@@ -472,9 +472,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       : [];
 
   /**
-   * Opsi filter diturunkan dari data yang benar-benar ada, bukan dari daftar
-   * master: bulan tanpa transaksi dan vault yang belum pernah dipakai tidak
-   * perlu muncul sebagai pilihan.
+   * Bulan dan vault memang diturunkan dari data yang benar-benar ada, tetapi
+   * kategori/sumber tidak boleh ikut disaring ke data historis: kategori baru
+   * yang belum pernah dipakai masih perlu muncul agar tidak terasa "hilang".
    */
   const availableMonths = [...new Set(transactions.map((tx) => tx.date.slice(0, 7)))].sort((a, b) =>
     b.localeCompare(a)
@@ -482,22 +482,15 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const usedVaultIds = new Set(
     transactions.map((tx) => tx.vault_id).filter((id): id is string => Boolean(id))
   );
-  // Tanpa jenis terpilih, kategori income dan expense digabung: "Makanan" dan
-  // "Gaji" sama-sama sah untuk disaring. Begitu jenis dipilih, daftar menyempit
-  // ke kategori yang relevan supaya tidak ada pilihan yang selalu kosong.
   const categoryOptions = (
     filterType === "expense"
       ? expenseCategories
       : filterType === "income"
         ? incomeCategories
         : [...incomeCategories, ...expenseCategories]
-  ).filter((category) => transactions.some((tx) => tx.category_id === category.id));
-  const vaultOptions = vaults.filter((vault) => usedVaultIds.has(vault.id));
-  const fundingSourceOptions = incomeCategories.filter((category) =>
-    transactions.some(
-      (tx) => tx.category_id === category.id || tx.funding_source_id === category.id
-    )
   );
+  const vaultOptions = vaults.filter((vault) => usedVaultIds.has(vault.id));
+  const fundingSourceOptions = incomeCategories;
   const dueRecurringTemplates = recurringTemplates.filter((template) =>
     template.is_active &&
     template.due_on <= todayJakartaISO() &&

@@ -56,15 +56,16 @@ export async function signUpAction(
   }
 
   const requestHeaders = await headers();
-  const origin =
-    requestHeaders.get("origin") ??
+  const siteUrl = (
     process.env.NEXT_PUBLIC_SITE_URL ??
-    "http://localhost:3000";
+    requestHeaders.get("origin") ??
+    "http://localhost:3000"
+  ).replace(/\/+$/, "");
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
-      emailRedirectTo: `${origin}/auth/callback?next=/${locale}/dashboard`,
+      emailRedirectTo: `${siteUrl}/auth/callback?next=/${locale}/dashboard`,
       data: { display_name: name || email.split("@")[0] },
     },
   });
