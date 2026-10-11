@@ -221,6 +221,12 @@ describe("evaluateArithmetic", () => {
     expect(evaluateArithmetic("100/5/2").value).toBe(10);
   });
 
+  it("menerima huruf x sebagai perkalian", () => {
+    expect(evaluateArithmetic("2x3").value).toBe(6);
+    expect(evaluateArithmetic("2+3x4").value).toBe(14);
+    expect(evaluateArithmetic("2X3").value).toBe(6);
+  });
+
   it("menghormati tanda kurung dan bilangan negatif", () => {
     expect(evaluateArithmetic("(2+3)*4").value).toBe(20);
     expect(evaluateArithmetic("-(3+4)").value).toBe(-7);

@@ -78,7 +78,7 @@ export function CalculatorPage() {
   const [tool, setTool] = useState<Tool>("loan");
 
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-5">
+    <div className="rise-in w-full space-y-5">
       <header className="space-y-1">
         <h1 className="font-display text-2xl font-semibold tracking-tight text-ink">
           {t("title")}
@@ -581,7 +581,7 @@ const DIGIT_ROWS = [
 ] as const;
 
 /** Kolom operator, sejajar dengan baris tombol angka. */
-const OPERATORS = ["/", "*", "-", "+"] as const;
+const OPERATORS = ["/", "x", "-", "+"] as const;
 
 /** Tombol utilitas di atas keypad. */
 const UTILITY_KEYS = [

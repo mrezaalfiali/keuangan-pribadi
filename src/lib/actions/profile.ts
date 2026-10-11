@@ -23,10 +23,11 @@ export async function saveDisplayName(
     return { ok: false, error: "settings.displayNameInvalid" };
   }
 
+  // Upsert (bukan update) supaya user yang belum punya baris profil — mis. akun
+  // lama sebelum trigger 0016 ada — tetap bisa menyimpan nama tampilan.
   const { error } = await supabase
     .from("profiles")
-    .update({ display_name: name })
-    .eq("id", user.id)
+    .upsert({ id: user.id, display_name: name }, { onConflict: "id" })
     .select("id")
     .single();
   if (error) {

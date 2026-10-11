@@ -99,6 +99,140 @@ body {
   animation: riseIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* Maskot koin bertunas (login/daftar) */
+@keyframes mascotFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes mascotSway {
+  0%,
+  100% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+
+@keyframes mascotBlink {
+  0%,
+  90%,
+  100% {
+    transform: scaleY(1);
+  }
+  94% {
+    transform: scaleY(0.12);
+  }
+}
+
+@keyframes mascotShake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-4px);
+  }
+  40% {
+    transform: translateX(4px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
+}
+
+@keyframes mascotJump {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-9px);
+  }
+  55% {
+    transform: translateY(0);
+  }
+  75% {
+    transform: translateY(-4px);
+  }
+}
+
+.mascot {
+  display: inline-block;
+}
+
+.mascot-svg {
+  animation: mascotFloat 4.5s ease-in-out infinite;
+  overflow: visible;
+}
+
+.mascot-sprout {
+  animation: mascotSway 3.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: bottom center;
+}
+
+.mascot-eye {
+  animation: mascotBlink 5.5s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mascot-eyes {
+  opacity: 1;
+  transition: opacity 0.18s ease;
+}
+
+.mascot-eyes-closed {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.mascot-paws {
+  opacity: 0;
+  transform: translateY(7px);
+  transform-box: fill-box;
+  transition:
+    transform 0.28s ease,
+    opacity 0.2s ease;
+}
+
+.mascot-sparkle {
+  animation: mascotBlink 2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mascot[data-mood="password"] .mascot-paws {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.mascot[data-mood="password"] .mascot-eyes {
+  opacity: 0;
+}
+
+.mascot[data-mood="password"] .mascot-eyes-closed {
+  opacity: 1;
+}
+
+.mascot[data-mood="error"] {
+  animation: mascotShake 0.5s ease-in-out;
+}
+
+.mascot[data-mood="pending"] .mascot-svg {
+  animation: mascotJump 0.8s ease-in-out infinite;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;

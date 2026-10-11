@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { distributeAllocation, previewAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
+import { distributeAllocation, previewAllocation, resolveIncomeAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
 import type { AllocationSlot } from "@/src/lib/types";
 
 type Slot = Pick<AllocationSlot, "vault_id" | "method" | "value">;
@@ -176,5 +176,25 @@ describe("previewAllocation", () => {
   it("total tidak valid menjadi 0, bukan NaN atau negatif", () => {
     expect(previewAllocation(-5, [{ vault_id: "v", method: "remainder", value: 0, priority: 0 }]).map((r) => r.amount)).toEqual([0]);
     expect(previewAllocation(Number.NaN, [{ vault_id: "v", method: "remainder", value: 0, priority: 0 }]).map((r) => r.amount)).toEqual([0]);
+  });
+});
+
+describe("resolveIncomeAllocation", () => {
+  it("mode auto membagi lewat aturan, vault tidak diperlukan", () => {
+    expect(resolveIncomeAllocation("auto", null)).toEqual({ ok: true, applyAllocation: true });
+    expect(resolveIncomeAllocation("auto", "vault-x")).toEqual({ ok: true, applyAllocation: true });
+  });
+
+  it("mode yang tidak diisi diperlakukan sebagai auto", () => {
+    expect(resolveIncomeAllocation(undefined, null)).toEqual({ ok: true, applyAllocation: true });
+    expect(resolveIncomeAllocation(null, null)).toEqual({ ok: true, applyAllocation: true });
+  });
+
+  it("mode single menaruh seluruh nominal di satu vault", () => {
+    expect(resolveIncomeAllocation("single", "vault-x")).toEqual({ ok: true, applyAllocation: false });
+  });
+
+  it("mode single tanpa vault ditolak", () => {
+    expect(resolveIncomeAllocation("single", null)).toEqual({ ok: false, error: "vaultRequired" });
   });
 });

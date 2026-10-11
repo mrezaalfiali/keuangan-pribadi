@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronLeft, ChevronRight, CircleDollarSign, Pause, Pencil, Play, Plus, SkipForward, Trash2 } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -11,7 +11,12 @@ import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/actions/transactions";
 import { createIncomeSource, deleteIncomeSource } from "@/src/lib/actions/categories";
-import { availableSources, summarizeSources, type SourceSummary } from "@/src/lib/sources";
+import {
+  computeSourceVaultBalances,
+  sourceVaultBalance,
+  summarizeSources,
+  type SourceSummary,
+} from "@/src/lib/sources";
 import { resolveLabel, humanizeSlug } from "@/src/lib/labels";
 import { todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
@@ -38,12 +43,219 @@ type TxRow = Transaction & {
   funding: CategoryRef | null;
 };
 
+/**
+ * Status "sembunyikan panduan langkah dasar" disimpan di luar React (localStorage)
+ * dan dibaca lewat `useSyncExternalStore` agar tidak memicu setState di effect.
+ */
+const ONBOARDING_DISMISSED_KEY = "nexora:onboarding-dismissed";
+let onboardingDismissedValue = false;
+let onboardingDismissedLoaded = false;
+const onboardingDismissedListeners = new Set<() => void>();
+
+function getOnboardingDismissedSnapshot() {
+  if (!onboardingDismissedLoaded) {
+    try {
+      onboardingDismissedValue = localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "1";
+    } catch {
+      onboardingDismissedValue = false;
+    }
+    onboardingDismissedLoaded = true;
+  }
+  return onboardingDismissedValue;
+}
+
+function subscribeOnboardingDismissed(listener: () => void) {
+  onboardingDismissedListeners.add(listener);
+  return () => {
+    onboardingDismissedListeners.delete(listener);
+  };
+}
+
+function dismissOnboardingStore() {
+  onboardingDismissedValue = true;
+  onboardingDismissedLoaded = true;
+  try {
+    localStorage.setItem(ONBOARDING_DISMISSED_KEY, "1");
+  } catch {
+    // localStorage bisa tidak tersedia (mode privat); abaikan.
+  }
+  onboardingDismissedListeners.forEach((listener) => listener());
+}
+
 function formatMoney(amount: number, locale: string) {
   return new Intl.NumberFormat(locale === "id" ? "id-ID" : "en-US", {
     style: "currency",
     currency: "IDR",
     maximumFractionDigits: 0,
   }).format(amount);
+}
+
+interface OccurrenceCopy {
+  amount: string;
+  date: string;
+  category: string;
+  sourceVault: string;
+  fundingSource: string;
+  selectVault: string;
+  selectVaultFirst: string;
+  noSourceInVault: string;
+  note: string;
+  none: string;
+  noVault: string;
+  recurringRecord: string;
+  recurringRemindTomorrow: string;
+  recurringSkip: string;
+  occurrenceHint: string;
+  allocationMode: string;
+  allocationAuto: string;
+  allocationSingle: string;
+  allocationAutoHint: string;
+  allocationSingleHint: string;
+  vaultRequired: string;
+  vaultNone: string;
+}
+
+/**
+ * Form pencatatan satu kemunculan jadwal. Dipisah jadi komponen sendiri
+ * supaya punya state vault/sumber sendiri per baris: daftar sumber pendana
+ * difilter oleh vault yang dipilih, sama seperti form tambah.
+ */
+function RecurringOccurrenceForm({
+  template,
+  vaults,
+  incomeCategories,
+  expenseCategories,
+  sourceVaultBalances,
+  locale,
+  categoryLabel,
+  vaultLabel,
+  copy,
+  onSubmit,
+  onSnooze,
+  onSkip,
+  saving,
+}: {
+  template: RecurringTransaction;
+  vaults: Vault[];
+  incomeCategories: Category[];
+  expenseCategories: Category[];
+  sourceVaultBalances: Map<string, number>;
+  locale: string;
+  categoryLabel: (category: CategoryRef | null | undefined) => string | null;
+  vaultLabel: (vault: Pick<Vault, "id" | "slug" | "name"> | null | undefined) => string | null;
+  copy: OccurrenceCopy;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSnooze: () => void;
+  onSkip: () => void;
+  saving: boolean;
+}) {
+  const [vaultId, setVaultId] = useState(template.vault_id ?? "");
+  const [fundingSourceId, setFundingSourceId] = useState(template.funding_source_id ?? "");
+  const [allocationMode, setAllocationMode] = useState<"auto" | "single">(template.vault_id ? "single" : "auto");
+  const isExpense = template.type === "expense";
+  const sources = vaultId
+    ? incomeCategories
+        .map((source) => ({
+          source,
+          balance: sourceVaultBalance(sourceVaultBalances, source.id, vaultId),
+        }))
+        .filter((row) => row.balance > 0 || row.source.id === fundingSourceId)
+        .sort((a, b) => b.balance - a.balance)
+    : [];
+
+  return (
+    <form onSubmit={onSubmit} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <p className="text-xs text-muted sm:col-span-2 lg:col-span-3">{copy.occurrenceHint}</p>
+      <input type="hidden" name="allocationMode" value={isExpense ? "single" : allocationMode} />
+      <Field label={copy.amount}>
+        <Input name="amount" type="number" min="1" step="1" defaultValue={template.amount} required />
+      </Field>
+      <Field label={copy.date}>
+        <Input name="transactionDate" type="date" defaultValue={todayJakartaISO()} max={todayJakartaISO()} required />
+      </Field>
+      <Field label={copy.category}>
+        <select name="categoryId" defaultValue={template.category_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
+          <option value="">{copy.none}</option>
+          {(isExpense ? expenseCategories : incomeCategories).map((category) => (
+            <option key={category.id} value={category.id}>{categoryLabel(category)}</option>
+          ))}
+        </select>
+      </Field>
+      {!isExpense && (
+        <Field label={copy.allocationMode} hint={allocationMode === "auto" ? copy.allocationAutoHint : copy.allocationSingleHint}>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setAllocationMode("auto")}
+              className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${allocationMode === "auto" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+            >
+              {copy.allocationAuto}
+            </button>
+            <button
+              type="button"
+              onClick={() => setAllocationMode("single")}
+              className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${allocationMode === "single" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+            >
+              {copy.allocationSingle}
+            </button>
+          </div>
+        </Field>
+      )}
+      <Field
+        label={copy.sourceVault}
+        hint={
+          !isExpense && allocationMode === "single" && vaults.length === 0
+            ? copy.vaultNone
+            : !isExpense && allocationMode === "single" && !vaultId
+              ? copy.vaultRequired
+              : undefined
+        }
+      >
+        <select
+          name="vaultId"
+          value={!isExpense && allocationMode === "auto" ? "" : vaultId}
+          onChange={(event) => {
+            setVaultId(event.target.value);
+            setFundingSourceId("");
+          }}
+          required={isExpense || (!isExpense && allocationMode === "single")}
+          disabled={!isExpense && allocationMode === "auto"}
+          className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+        >
+          <option value="" disabled={isExpense}>{isExpense || (!isExpense && allocationMode === "single") ? copy.selectVault : copy.noVault}</option>
+          {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={isExpense && vault.is_locked}>{vaultLabel(vault)}</option>)}
+        </select>
+      </Field>
+      {isExpense && (
+        <Field
+          label={copy.fundingSource}
+          hint={!vaultId ? copy.selectVaultFirst : sources.length === 0 ? copy.noSourceInVault : undefined}
+        >
+          <select
+            name="fundingSourceId"
+            value={fundingSourceId}
+            onChange={(event) => setFundingSourceId(event.target.value)}
+            required
+            disabled={sources.length === 0}
+            className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+          >
+            <option value="">{copy.none}</option>
+            {sources.map((row) => (
+              <option key={row.source.id} value={row.source.id}>{categoryLabel(row.source)} · {formatMoney(row.balance, locale)}</option>
+            ))}
+          </select>
+        </Field>
+      )}
+      <Field label={copy.note}>
+        <Input name="note" maxLength={240} defaultValue={template.note ?? template.name} />
+      </Field>
+      <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-3">
+        <Button type="submit" disabled={saving}>{copy.recurringRecord}</Button>
+        <Button type="button" variant="outline" disabled={saving} onClick={onSnooze}>{copy.recurringRemindTomorrow}</Button>
+        <Button type="button" variant="ghost" disabled={saving} onClick={onSkip}><SkipForward size={15} />{copy.recurringSkip}</Button>
+      </div>
+    </form>
+  );
 }
 
 export function SupabaseFinancePage({ section }: { section: "dashboard" | "transactions" }) {
@@ -71,6 +283,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [editingTransaction, setEditingTransaction] = useState<TxRow | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [type, setType] = useState<"income" | "expense">("expense");
+  const [allocationMode, setAllocationMode] = useState<"auto" | "single">("auto");
+  const [formVaultId, setFormVaultId] = useState("");
+  const [formFundingSourceId, setFormFundingSourceId] = useState("");
+  const [addFormOpen, setAddFormOpen] = useState(false);
+  const [expandedTxId, setExpandedTxId] = useState<number | null>(null);
+  const onboardingDismissed = useSyncExternalStore(
+    subscribeOnboardingDismissed,
+    getOnboardingDismissedSnapshot,
+    () => false
+  );
   const [sourceName, setSourceName] = useState("");
   const [sourceFormError, setSourceFormError] = useState("");
   const [savingSource, setSavingSource] = useState(false);
@@ -84,6 +306,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [filterFundingSource, setFilterFundingSource] = useState("");
   const [filterVault, setFilterVault] = useState("");
   const [filterSearch, setFilterSearch] = useState("");
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [summaryMonth, setSummaryMonth] = useState(todayISO().slice(0, 7));
   const [recurringFormOpen, setRecurringFormOpen] = useState(false);
   const [editingRecurringId, setEditingRecurringId] = useState("");
@@ -92,6 +315,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [recurringCategoryId, setRecurringCategoryId] = useState("");
   const [recurringFundingSourceId, setRecurringFundingSourceId] = useState("");
   const [recurringVaultId, setRecurringVaultId] = useState("");
+  const [recurringAllocationMode, setRecurringAllocationMode] = useState<"auto" | "single">("auto");
+  const [recurringIntervalCount, setRecurringIntervalCount] = useState(1);
+  const [editVaultId, setEditVaultId] = useState("");
+  const [editFundingSourceId, setEditFundingSourceId] = useState("");
 
   /**
    * Nama kategori dan vault, diseragamkan dengan halaman Alokasi/Anggaran
@@ -196,6 +423,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   });
   const onboardingSteps = getOnboardingSteps(transactions, vaults, budgets, todayJakartaISO());
   const completedOnboardingSteps = onboardingSteps.filter((step) => step.complete).length;
+  const onboardingAllComplete = completedOnboardingSteps === onboardingSteps.length;
+  const dismissOnboarding = () => dismissOnboardingStore();
   const monthLabel = (month: string) =>
     new Intl.DateTimeFormat(locale === "id" ? "id-ID" : "en-US", {
       month: "long",
@@ -205,12 +434,42 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const incomeCategories = categories.filter((category) => category.type === "income");
   const expenseCategories = categories.filter((category) => category.type === "expense");
   const sourceSummaries = summarizeSources(transactions, incomeCategories);
-  // Zero-balance sources are hidden here; the server re-checks the balance on
-  // insert, so this list is a convenience, not the guard.
-  const fundableSources = availableSources(sourceSummaries);
+  // Saldo per pasangan (sumber, vault), bukan per sumber: sebuah sumber hanya
+  // boleh membiayai pengeluaran dari vault tempat uangnya benar-benar tersimpan.
+  const sourceVaultBalances = useMemo(
+    () => computeSourceVaultBalances(transactions),
+    [transactions]
+  );
+  // Vault dulu, baru sumber: daftar sumber pendana mengikuti vault yang dipilih.
+  const vaultSources = formVaultId
+    ? incomeCategories
+        .map((source) => ({
+          source,
+          balance: sourceVaultBalance(sourceVaultBalances, source.id, formVaultId),
+        }))
+        .filter((row) => row.balance > 0)
+        .sort((a, b) => b.balance - a.balance)
+    : [];
   // "Never recorded any income" and "every source is empty" need different
   // guidance: the first means create a source, the second means add income.
   const emptySourceHint = incomeCategories.length === 0 ? txText("noSourceYet") : txText("noSource");
+
+  /**
+   * Sumber pendana untuk satu vault, dipakai form edit dan form jadwal
+   * berulang. Sumber yang sedang terpilih selalu ikut ditampilkan meski
+   * saldonya di vault itu nol, supaya nilai lama tidak hilang dari dropdown
+   * saat baris dibuka.
+   */
+  const sourcesInVault = (vaultId: string, keepSourceId?: string | null) =>
+    vaultId
+      ? incomeCategories
+          .map((source) => ({
+            source,
+            balance: sourceVaultBalance(sourceVaultBalances, source.id, vaultId),
+          }))
+          .filter((row) => row.balance > 0 || (keepSourceId && row.source.id === keepSourceId))
+          .sort((a, b) => b.balance - a.balance)
+      : [];
 
   /**
    * Opsi filter diturunkan dari data yang benar-benar ada, bukan dari daftar
@@ -249,6 +508,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     filterType || filterMonth || filterFromDate || filterToDate || filterMinAmount ||
     filterMaxAmount || filterCategory || filterFundingSource || filterVault || filterSearch
   );
+  const advancedFiltersCount = [
+    filterMonth,
+    filterFromDate,
+    filterToDate,
+    filterMinAmount,
+    filterMaxAmount,
+    filterCategory,
+    filterFundingSource,
+    filterVault,
+  ].filter(Boolean).length;
 
   /**
    * Pencarian sengaja mencocokkan label kategori dan vault, bukan hanya
@@ -333,12 +602,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       case "err.occurrence":
       case "err.snoozed": return txText("recurringStaleError");
       case "transactions.insufficientSource": return txText("insufficientSource");
+      case "transactions.sourceNotInVault": return txText("sourceNotInVault");
+      case "transactions.noSource": return emptySourceHint;
+      case "transactions.insufficient": return txText("insufficient");
+      case "transactions.lockedError": return txText("lockedError");
+      case "transactions.allocationRuleRequired": return txText("allocationRuleRequired");
+      case "transactions.expenseVaultRequired": return txText("expenseVaultRequired");
       default: return settings("saveError");
     }
   }
 
   async function submitRecurringTemplate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (recurringType === "expense" && !recurringVaultId) {
+      setError(txText("expenseVaultRequired"));
+      return;
+    }
+    if (recurringType === "income" && recurringAllocationMode === "single" && !recurringVaultId) {
+      setError(txText("vaultRequired"));
+      return;
+    }
     const form = event.currentTarget;
     const data = new FormData(form);
     setSaving(true);
@@ -352,7 +635,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         amount: Number(data.get("recurringAmount")),
         categoryId: recurringCategoryId || null,
         fundingSourceId: recurringType === "expense" ? recurringFundingSourceId || null : null,
-        vaultId: recurringVaultId || null,
+        vaultId: recurringType === "income" && recurringAllocationMode === "auto" ? null : recurringVaultId || null,
         frequency: recurringFrequency,
         intervalCount: Number(data.get("intervalCount")),
         dueOn: String(data.get("dueOn") ?? ""),
@@ -381,6 +664,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   ) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    const allocationMode = String(data.get("allocationMode") ?? "auto");
+    const vaultId = String(data.get("vaultId") ?? "") || null;
+    if (template.type === "income" && allocationMode === "single" && !vaultId) {
+      setError(txText("vaultRequired"));
+      return;
+    }
     setSaving(true);
     setError("");
     setRewardNotice("");
@@ -397,6 +686,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           : null,
         vaultId: String(data.get("vaultId") ?? "") || null,
         note: String(data.get("note") ?? ""),
+        allocationMode: allocationMode === "single" ? "single" : "auto",
       });
       if (!result.ok) {
         setError(recurringErrorMessage(result.error));
@@ -459,13 +749,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setRecurringCategoryId(template.category_id ?? "");
     setRecurringFundingSourceId(template.funding_source_id ?? "");
     setRecurringVaultId(template.vault_id ?? "");
+    setRecurringAllocationMode(template.vault_id ? "single" : "auto");
+    setRecurringIntervalCount(template.interval_count);
     setRecurringFormOpen(true);
   }
 
   function transactionError(code: string | undefined) {
     if (code === "transactions.lockedError") return txText("lockedError");
     if (code === "transactions.noSource") return emptySourceHint;
+    if (code === "transactions.sourceNotInVault") return txText("sourceNotInVault");
     if (code === "transactions.insufficientSource") return txText("insufficientSource");
+    if (code === "transactions.vaultRequired") return txText("vaultRequired");
+    if (code === "transactions.allocationRuleRequired") return txText("allocationRuleRequired");
+    if (code === "transactions.expenseVaultRequired") return txText("expenseVaultRequired");
     return settings("saveError");
   }
 
@@ -525,8 +821,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     const categoryId = String(data.get("categoryId") ?? "") || null;
     const fundingSourceId = String(data.get("fundingSourceId") ?? "") || null;
     // Blocked before the request goes out; the server repeats the check.
+    if (type === "expense" && !vaultId) {
+      setFormError(txText("expenseVaultRequired"));
+      return;
+    }
     if (type === "expense" && !fundingSourceId) {
-      setFormError(emptySourceHint);
+      setFormError(vaultSources.length === 0 ? txText("noSourceInVault") : emptySourceHint);
+      return;
+    }
+    if (type === "income" && allocationMode === "single" && !vaultId) {
+      setFormError(txText("vaultRequired"));
       return;
     }
     setSaving(true);
@@ -541,6 +845,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         categoryId,
         fundingSourceId: type === "expense" ? fundingSourceId : null,
         vaultId,
+        allocationMode: type === "income" ? allocationMode : null,
         note: String(data.get("note") ?? "").trim() || null,
       });
       if (!result.ok) {
@@ -570,7 +875,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         setRewardNotice(rewardMessages.join(" · "));
       }
       form.reset();
+      setFormVaultId("");
+      setFormFundingSourceId("");
       await load();
+      if (section === "dashboard") setAddFormOpen(false);
     } catch (saveError) {
       console.error("Supabase transaction insert failed.", saveError);
       setFormError(settings("saveError"));
@@ -622,9 +930,13 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         note: String(formData.get("note") ?? "") || null,
       });
       if (!result.ok) {
-        setEditError(result.error === "transactions.insufficientSource"
-          ? txText("insufficientSource")
-          : settings("saveError"));
+        if (result.error === "transactions.insufficientSource") setEditError(txText("insufficientSource"));
+        else if (result.error === "transactions.sourceNotInVault") setEditError(txText("sourceNotInVault"));
+        else if (result.error === "transactions.noSource") setEditError(emptySourceHint);
+        else if (result.error === "transactions.insufficient") setEditError(txText("insufficient"));
+        else if (result.error === "transactions.lockedError") setEditError(txText("lockedError"));
+        else if (result.error === "transactions.expenseVaultRequired") setEditError(txText("expenseVaultRequired"));
+        else setEditError(settings("saveError"));
         return;
       }
       setEditingTransaction(null);
@@ -638,6 +950,84 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
+  function transactionEditForm(transaction: TxRow) {
+    return (
+      <form onSubmit={saveTransactionEdit} className="mb-2 grid gap-4 rounded-2xl border border-line bg-bg1/60 p-4 sm:grid-cols-2">
+        <h3 className="font-display text-sm font-semibold text-ink sm:col-span-2">{txText("editTitle")}</h3>
+        <Field label={txText("amount")}>
+          <Input name="amount" type="number" min="1" max="2147483647" step="1" defaultValue={transaction.amount} required />
+        </Field>
+        <Field label={txText("date")}>
+          <Input name="date" type="date" defaultValue={transaction.date} required />
+        </Field>
+        <Field label={txText("category")}>
+          <select name="categoryId" defaultValue={transaction.category_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
+            <option value="">{common("none")}</option>
+            {(transaction.type === "income" ? incomeCategories : expenseCategories).map((category) => (
+              <option key={category.id} value={category.id}>{categoryLabel(category) ?? humanizeSlug(category.slug)}</option>
+            ))}
+          </select>
+        </Field>
+        {transaction.type === "expense" && (
+          <Field
+            label={txText("fundingSource")}
+            hint={!editVaultId ? txText("selectVaultFirst") : sourcesInVault(editVaultId, editFundingSourceId).length === 0 ? txText("noSourceInVault") : undefined}
+          >
+            <select
+              name="fundingSourceId"
+              value={editFundingSourceId}
+              onChange={(event) => setEditFundingSourceId(event.target.value)}
+              required
+              disabled={sourcesInVault(editVaultId, editFundingSourceId).length === 0}
+              className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+            >
+              <option value="">{common("none")}</option>
+              {sourcesInVault(editVaultId, editFundingSourceId).map((row) => (
+                <option key={row.source.id} value={row.source.id}>{categoryLabel(row.source) ?? humanizeSlug(row.source.slug)} · {formatMoney(row.balance, locale)}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field
+          label={txText("sourceVault")}
+          hint={
+            transaction.type === "expense"
+              ? vaults.length === 0
+                ? txText("recurringVaultNone")
+                : editVaultId
+                  ? undefined
+                  : txText("expenseVaultRequired")
+              : undefined
+          }
+        >
+          <select
+            name="vaultId"
+            value={editVaultId}
+            onChange={(event) => {
+              setEditVaultId(event.target.value);
+              setEditFundingSourceId("");
+            }}
+            required={transaction.type === "expense"}
+            className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
+          >
+            <option value="" disabled={transaction.type === "expense"}>{transaction.type === "expense" ? txText("selectVault") : settings("noVault")}</option>
+            {vaults.filter((vault) => transaction.type === "income" || !vault.is_locked || vault.id === transaction.vault_id).map((vault) => (
+              <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label={txText("note")} className="sm:col-span-2">
+          <Input name="note" maxLength={200} defaultValue={transaction.note ?? ""} />
+        </Field>
+        {editError && <p role="alert" className="text-sm text-danger sm:col-span-2">{editError}</p>}
+        <div className="flex gap-2 sm:col-span-2">
+          <Button type="submit" disabled={savingEdit}>{common("save")}</Button>
+          <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditError(""); }}>{common("cancel")}</Button>
+        </div>
+      </form>
+    );
+  }
+
   return (
     <div className="rise-in space-y-6">
       <div>
@@ -648,55 +1038,6 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       {error && <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{notice}</p>}
       {rewardNotice && <p role={rewardFailed ? "alert" : "status"} className={`rounded-xl border p-3 text-sm ${rewardFailed ? "border-danger/30 bg-danger/10 text-danger" : "border-accent/30 bg-accent/10 text-accent"}`}>{rewardNotice}</p>}
-      {section === "transactions" && editingTransaction && (
-        <Card>
-          <CardContent className="p-5">
-            <h2 className="font-display text-lg font-semibold text-ink">{txText("editTitle")}</h2>
-            <form onSubmit={saveTransactionEdit} className="mt-4 grid gap-4 sm:grid-cols-2">
-              <Field label={txText("amount")}>
-                <Input name="amount" type="number" min="1" max="2147483647" step="1" defaultValue={editingTransaction.amount} required />
-              </Field>
-              <Field label={txText("date")}>
-                <Input name="date" type="date" defaultValue={editingTransaction.date} required />
-              </Field>
-              <Field label={txText("category")}>
-                <select name="categoryId" defaultValue={editingTransaction.category_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                  <option value="">{common("none")}</option>
-                  {(editingTransaction.type === "income" ? incomeCategories : expenseCategories).map((category) => (
-                    <option key={category.id} value={category.id}>{categoryLabel(category) ?? humanizeSlug(category.slug)}</option>
-                  ))}
-                </select>
-              </Field>
-              {editingTransaction.type === "expense" && (
-                <Field label={txText("fundingSource")}>
-                  <select name="fundingSourceId" defaultValue={editingTransaction.funding_source_id ?? ""} required className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                    <option value="">{common("none")}</option>
-                    {incomeCategories.map((category) => (
-                      <option key={category.id} value={category.id}>{categoryLabel(category) ?? humanizeSlug(category.slug)}</option>
-                    ))}
-                  </select>
-                </Field>
-              )}
-              <Field label={txText("sourceVault")}>
-                <select name="vaultId" defaultValue={editingTransaction.vault_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                  <option value="">{common("none")}</option>
-                  {vaults.filter((vault) => editingTransaction.type === "income" || !vault.is_locked || vault.id === editingTransaction.vault_id).map((vault) => (
-                    <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>
-                  ))}
-                </select>
-              </Field>
-              <Field label={txText("note")} className="sm:col-span-2">
-                <Input name="note" maxLength={200} defaultValue={editingTransaction.note ?? ""} />
-              </Field>
-              {editError && <p role="alert" className="text-sm text-danger sm:col-span-2">{editError}</p>}
-              <div className="flex gap-2 sm:col-span-2">
-                <Button type="submit" disabled={savingEdit}>{common("save")}</Button>
-                <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditError(""); }}>{common("cancel")}</Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
-      )}
       {section === "dashboard" && (
         <div className="grid gap-4 sm:grid-cols-3">
           <SummaryCard label={dashboard("totalBalance")} value={formatMoney(totalIncome - totalExpense, locale)} />
@@ -704,14 +1045,14 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           <SummaryCard label={dashboard("expense")} value={formatMoney(totalExpense, locale)} icon={<ArrowUpRight size={17} />} />
         </div>
       )}
-      {section === "dashboard" && !loading && !error && (
+      {section === "dashboard" && !loading && !error && !(onboardingDismissed && onboardingAllComplete) && (
         <Card>
           <CardContent className="p-5">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <h2 className="font-display text-lg font-semibold text-ink">{dashboard("onboardingTitle")}</h2>
                 <p className="mt-1 text-sm text-muted">
-                  {completedOnboardingSteps === onboardingSteps.length
+                  {onboardingAllComplete
                     ? dashboard("onboardingComplete")
                     : dashboard("onboardingProgress", {
                         complete: completedOnboardingSteps,
@@ -719,18 +1060,31 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       })}
                 </p>
               </div>
-              <div
-                role="progressbar"
-                aria-label={dashboard("onboardingTitle")}
-                aria-valuemin={0}
-                aria-valuemax={onboardingSteps.length}
-                aria-valuenow={completedOnboardingSteps}
-                className="h-2 w-full overflow-hidden rounded-full bg-bg1 sm:w-36"
-              >
+              <div className="flex w-full items-center gap-3 sm:w-auto">
                 <div
-                  className="h-full rounded-full bg-accent transition-[width] duration-500"
-                  style={{ width: `${(completedOnboardingSteps / onboardingSteps.length) * 100}%` }}
-                />
+                  role="progressbar"
+                  aria-label={dashboard("onboardingTitle")}
+                  aria-valuemin={0}
+                  aria-valuemax={onboardingSteps.length}
+                  aria-valuenow={completedOnboardingSteps}
+                  className="h-2 w-full overflow-hidden rounded-full bg-bg1 sm:w-36"
+                >
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-500"
+                    style={{ width: `${(completedOnboardingSteps / onboardingSteps.length) * 100}%` }}
+                  />
+                </div>
+                {onboardingAllComplete && (
+                  <button
+                    type="button"
+                    onClick={dismissOnboarding}
+                    aria-label={dashboard("onboardingDismiss")}
+                    title={dashboard("onboardingDismiss")}
+                    className="shrink-0 rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                  >
+                    <X size={16} />
+                  </button>
+                )}
               </div>
             </div>
             <ol className="mt-4 grid gap-2 sm:grid-cols-3">
@@ -897,6 +1251,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     setRecurringCategoryId("");
                     setRecurringFundingSourceId("");
                     setRecurringVaultId("");
+                    setRecurringAllocationMode("auto");
+                    setRecurringIntervalCount(1);
                     setRecurringFormOpen(true);
                   }
                 }}
@@ -937,11 +1293,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     <option value="monthly">{txText("recurringMonthly")}</option>
                   </select>
                 </Field>
-                <Field label={txText("recurringInterval")}>
-                  <Input name="intervalCount" type="number" min="1" max="12" step="1" defaultValue={recurringTemplates.find((item) => item.id === editingRecurringId)?.interval_count ?? 1} required />
+                <Field
+                  label={txText("recurringInterval")}
+                  hint={recurringFrequency === "weekly" ? txText("recurringIntervalHintWeekly") : txText("recurringIntervalHintMonthly")}
+                >
+                  <Input
+                    name="intervalCount"
+                    type="number"
+                    min="1"
+                    max="12"
+                    step="1"
+                    value={recurringIntervalCount}
+                    onChange={(event) => setRecurringIntervalCount(Number(event.target.value) || 1)}
+                    required
+                  />
                 </Field>
+                <p className="self-end pb-2 text-xs text-muted">
+                  {txText(recurringFrequency === "weekly" ? "recurringEveryWeeks" : "recurringEveryMonths", { count: recurringIntervalCount })}
+                </p>
                 {recurringFrequency === "monthly" && (
-                  <p className="self-end pb-2 text-xs text-faint">{txText("recurringMonthEndRule")}</p>
+                  <p className="text-xs text-faint sm:col-span-2 lg:col-span-3">{txText("recurringMonthEndRule")}</p>
                 )}
                 <Field label={txText("recurringNextDate")}>
                   <Input name="dueOn" type="date" defaultValue={recurringTemplates.find((item) => item.id === editingRecurringId)?.due_on ?? todayJakartaISO()} required />
@@ -961,31 +1332,72 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     ))}
                   </select>
                 </Field>
+                {recurringType === "income" && (
+                  <Field label={txText("allocationMode")} hint={recurringAllocationMode === "auto" ? txText("allocationAutoHint") : txText("allocationSingleHint")}>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRecurringAllocationMode("auto");
+                          setRecurringVaultId("");
+                        }}
+                        className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${recurringAllocationMode === "auto" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+                      >
+                        {txText("allocationAuto")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRecurringAllocationMode("single")}
+                        className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${recurringAllocationMode === "single" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+                      >
+                        {txText("allocationSingle")}
+                      </button>
+                    </div>
+                  </Field>
+                )}
+                <Field
+                  label={txText("sourceVault")}
+                  hint={
+                    recurringType === "income" && recurringAllocationMode === "single" && vaults.length === 0
+                      ? txText("recurringVaultNone")
+                      : recurringType === "income" && recurringAllocationMode === "single" && !recurringVaultId
+                        ? txText("vaultRequired")
+                        : undefined
+                  }
+                >
+                  <select
+                    value={recurringType === "income" && recurringAllocationMode === "auto" ? "" : recurringVaultId}
+                    onChange={(event) => {
+                      setRecurringVaultId(event.target.value);
+                      setRecurringFundingSourceId("");
+                    }}
+                    required={recurringType === "expense" || (recurringType === "income" && recurringAllocationMode === "single")}
+                    disabled={recurringType === "income" && recurringAllocationMode === "auto"}
+                    className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+                  >
+                    <option value="" disabled={recurringType === "expense"}>{recurringType === "expense" || (recurringType === "income" && recurringAllocationMode === "single") ? txText("selectVault") : settings("noVault")}</option>
+                    {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={recurringType === "expense" && vault.is_locked}>{vaultLabel(vault)}</option>)}
+                  </select>
+                </Field>
                 {recurringType === "expense" && (
-                  <Field label={txText("fundingSource")}>
+                  <Field
+                    label={txText("fundingSource")}
+                    hint={!recurringVaultId ? txText("selectVaultFirst") : sourcesInVault(recurringVaultId, recurringFundingSourceId).length === 0 ? txText("noSourceInVault") : undefined}
+                  >
                     <select
                       value={recurringFundingSourceId}
                       onChange={(event) => setRecurringFundingSourceId(event.target.value)}
                       required
-                      className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
+                      disabled={sourcesInVault(recurringVaultId, recurringFundingSourceId).length === 0}
+                      className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
                     >
                       <option value="">{common("none")}</option>
-                      {incomeCategories.map((category) => (
-                        <option key={category.id} value={category.id}>{categoryLabel(category)}</option>
+                      {sourcesInVault(recurringVaultId, recurringFundingSourceId).map((row) => (
+                        <option key={row.source.id} value={row.source.id}>{categoryLabel(row.source)} · {formatMoney(row.balance, locale)}</option>
                       ))}
                     </select>
                   </Field>
                 )}
-                <Field label={txText("sourceVault")}>
-                  <select
-                    value={recurringVaultId}
-                    onChange={(event) => setRecurringVaultId(event.target.value)}
-                    className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
-                  >
-                    <option value="">{settings("noVault")}</option>
-                    {vaults.map((vault) => <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>)}
-                  </select>
-                </Field>
                 <Field label={txText("note")} className="sm:col-span-2 lg:col-span-3">
                   <Input name="recurringNote" maxLength={240} defaultValue={recurringTemplates.find((item) => item.id === editingRecurringId)?.note ?? ""} />
                 </Field>
@@ -1012,53 +1424,50 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                         </div>
                         <p className="num font-semibold text-ink">{formatMoney(template.amount, locale)}</p>
                       </div>
-                      <form onSubmit={(event) => void submitRecurringOccurrence(event, template)} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        <p className="text-xs text-muted sm:col-span-2 lg:col-span-3">{txText("recurringOccurrenceEditHint")}</p>
-                        <Field label={txText("amount")}>
-                          <Input name="amount" type="number" min="1" step="1" defaultValue={template.amount} required />
-                        </Field>
-                        <Field label={txText("date")}>
-                          <Input name="transactionDate" type="date" defaultValue={todayJakartaISO()} max={todayJakartaISO()} required />
-                        </Field>
-                        <Field label={txText("category")}>
-                          <select name="categoryId" defaultValue={template.category_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                            <option value="">{common("none")}</option>
-                            {(template.type === "income" ? incomeCategories : expenseCategories).map((category) => (
-                              <option key={category.id} value={category.id}>{categoryLabel(category)}</option>
-                            ))}
-                          </select>
-                        </Field>
-                        {template.type === "expense" && (
-                          <Field label={txText("fundingSource")}>
-                            <select name="fundingSourceId" defaultValue={template.funding_source_id ?? ""} required className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                              <option value="">{common("none")}</option>
-                              {incomeCategories.map((category) => (
-                                <option key={category.id} value={category.id}>{categoryLabel(category)}</option>
-                              ))}
-                            </select>
-                          </Field>
+                      <RecurringOccurrenceForm
+                        template={template}
+                        vaults={vaults}
+                        incomeCategories={incomeCategories}
+                        expenseCategories={expenseCategories}
+                        sourceVaultBalances={sourceVaultBalances}
+                        locale={locale}
+                        categoryLabel={categoryLabel}
+                        vaultLabel={vaultLabel}
+                        copy={{
+                          amount: txText("amount"),
+                          date: txText("date"),
+                          category: txText("category"),
+                          sourceVault: txText("sourceVault"),
+                          fundingSource: txText("fundingSource"),
+                          selectVault: txText("selectVault"),
+                          selectVaultFirst: txText("selectVaultFirst"),
+                          noSourceInVault: txText("noSourceInVault"),
+                          note: txText("note"),
+                          none: common("none"),
+                          noVault: settings("noVault"),
+                          recurringRecord: txText("recurringRecord"),
+                          recurringRemindTomorrow: txText("recurringRemindTomorrow"),
+                          recurringSkip: txText("recurringSkip"),
+                          occurrenceHint: txText("recurringOccurrenceEditHint"),
+                          allocationMode: txText("allocationMode"),
+                          allocationAuto: txText("allocationAuto"),
+                          allocationSingle: txText("allocationSingle"),
+                          allocationAutoHint: txText("allocationAutoHint"),
+                          allocationSingleHint: txText("allocationSingleHint"),
+                          vaultRequired: txText("vaultRequired"),
+                          vaultNone: txText("recurringVaultNone"),
+                        }}
+                        onSubmit={(event) => void submitRecurringOccurrence(event, template)}
+                        onSnooze={() => void runRecurringAction(
+                          () => snoozeRecurringOccurrence(locale, template.id, template.due_on),
+                          txText("recurringSnoozed")
                         )}
-                        <Field label={txText("sourceVault")}>
-                          <select name="vaultId" defaultValue={template.vault_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                            <option value="">{settings("noVault")}</option>
-                            {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={template.type === "expense" && vault.is_locked}>{vaultLabel(vault)}</option>)}
-                          </select>
-                        </Field>
-                        <Field label={txText("note")}>
-                          <Input name="note" maxLength={240} defaultValue={template.note ?? template.name} />
-                        </Field>
-                        <div className="flex flex-wrap gap-2 sm:col-span-2 lg:col-span-3">
-                          <Button type="submit" disabled={saving}>{txText("recurringRecord")}</Button>
-                          <Button type="button" variant="outline" disabled={saving} onClick={() => void runRecurringAction(
-                            () => snoozeRecurringOccurrence(locale, template.id, template.due_on),
-                            txText("recurringSnoozed")
-                          )}>{txText("recurringRemindTomorrow")}</Button>
-                          <Button type="button" variant="ghost" disabled={saving} onClick={() => void runRecurringAction(
-                            () => skipRecurringOccurrence(locale, template.id, template.due_on),
-                            txText("recurringSkipped")
-                          )}><SkipForward size={15} />{txText("recurringSkip")}</Button>
-                        </div>
-                      </form>
+                        onSkip={() => void runRecurringAction(
+                          () => skipRecurringOccurrence(locale, template.id, template.due_on),
+                          txText("recurringSkipped")
+                        )}
+                        saving={saving}
+                      />
                     </li>
                   ))}
                 </ul>
@@ -1185,22 +1594,92 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           </CardContent>
         </Card>
       )}
-      <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-        <Card><CardContent className="p-5">
-          <h2 className="font-display text-lg font-semibold text-ink">{txText("addTitle")}</h2>
-          <form onSubmit={submitTransaction} className="mt-5 flex flex-col gap-4">
+      <div className={`grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] ${section === "dashboard" && !addFormOpen ? "" : "items-start"}`}>
+        <Card><CardContent className={`p-5${section === "dashboard" && !addFormOpen ? " flex h-full flex-col" : ""}`}>
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="font-display text-lg font-semibold text-ink">{txText("addTitle")}</h2>
+            {section === "dashboard" && addFormOpen && (
+              <button
+                type="button"
+                onClick={() => setAddFormOpen(false)}
+                className="text-xs font-medium text-muted transition-colors hover:text-ink"
+              >
+                {common("close")}
+              </button>
+            )}
+          </div>
+          {section === "dashboard" && !addFormOpen ? (
+            <button
+              type="button"
+              onClick={() => setAddFormOpen(true)}
+              className="mt-4 flex flex-1 items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-bg1/60 px-4 py-6 text-sm font-medium text-muted transition-colors hover:border-accent/40 hover:text-ink"
+            >
+              <Plus size={16} />
+              {txText("addTitle")}
+            </button>
+          ) : (
+            <form onSubmit={submitTransaction} className="mt-5 flex flex-col gap-4">
             <Field label={txText("type")}>
-              <select name="type" value={type} onChange={(event) => setType(event.target.value as "income" | "expense")} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
+              <select name="type" value={type} onChange={(event) => {
+                setType(event.target.value as "income" | "expense");
+                setFormFundingSourceId("");
+              }} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
                 <option value="income">{txText("income")}</option>
                 <option value="expense">{txText("expense")}</option>
               </select>
             </Field>
             <Field label={txText("amount")}><Input name="amount" type="number" min="1" step="1" required /></Field>
             <Field label={txText("date")}><Input name="date" type="date" defaultValue={todayISO()} required /></Field>
-            <Field label={txText("sourceVault")}>
-              <select name="vaultId" defaultValue="" className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
-                <option value="">{settings("noVault")}</option>
-                {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={type === "expense" && vault.is_locked}>{vaultLabel(vault)}{vault.is_locked ? ` · ${txText("lockedError")}` : ""}</option>)}
+            {type === "income" && (
+              <Field label={txText("allocationMode")} hint={txText(allocationMode === "auto" ? "allocationAutoHint" : "allocationSingleHint")}>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAllocationMode("auto");
+                      setFormVaultId("");
+                    }}
+                    className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${allocationMode === "auto" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+                  >
+                    {txText("allocationAuto")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllocationMode("single")}
+                    className={`h-10 rounded-xl px-3 text-sm font-semibold transition-colors ${allocationMode === "single" ? "bg-accent text-bg0" : "border border-line bg-bg1 text-muted hover:text-ink"}`}
+                  >
+                    {txText("allocationSingle")}
+                  </button>
+                </div>
+              </Field>
+            )}
+            <Field
+              label={txText("sourceVault")}
+              hint={
+                type === "expense" || (type === "income" && allocationMode === "single")
+                  ? vaults.length === 0
+                    ? txText("recurringVaultNone")
+                    : formVaultId
+                      ? undefined
+                      : type === "expense"
+                        ? txText("expenseVaultRequired")
+                        : txText("vaultRequired")
+                  : undefined
+              }
+            >
+              <select
+                name="vaultId"
+                value={type === "income" && allocationMode === "auto" ? "" : formVaultId}
+                onChange={(event) => {
+                  setFormVaultId(event.target.value);
+                  setFormFundingSourceId("");
+                }}
+                required={type === "expense" || (type === "income" && allocationMode === "single")}
+                disabled={type === "income" && allocationMode === "auto"}
+                className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+              >
+                <option value="" disabled={type === "expense"}>{type === "expense" || (type === "income" && allocationMode === "single") ? txText("selectVault") : settings("noVault")}</option>
+                {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={type === "expense" && vault.is_locked}>{vaultLabel(vault)}</option>)}
               </select>
             </Field>
             <Field label={txText("category")}>
@@ -1214,19 +1693,30 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               </select>
             </Field>
             {type === "expense" && (
-              <Field label={txText("fundingSource")} hint={fundableSources.length === 0 ? emptySourceHint : undefined}>
+              <Field
+                label={txText("fundingSource")}
+                hint={
+                  !formVaultId
+                    ? txText("selectVaultFirst")
+                    : vaultSources.length === 0
+                      ? incomeCategories.length === 0
+                        ? txText("noSourceYet")
+                        : txText("noSourceInVault")
+                      : undefined
+                }
+              >
                 <select
-                  key={`funding-${fundableSources.length}`}
                   name="fundingSourceId"
-                  defaultValue=""
+                  value={formFundingSourceId}
+                  onChange={(event) => setFormFundingSourceId(event.target.value)}
                   required
-                  disabled={fundableSources.length === 0}
+                  disabled={vaultSources.length === 0}
                   className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
                 >
                   <option value="">{common("none")}</option>
-                  {fundableSources.map((summary) => (
-                    <option key={summary.source.id} value={summary.source.id}>
-                      {sourceLabel(summary)} · {formatMoney(summary.balance, locale)}
+                  {vaultSources.map((row) => (
+                    <option key={row.source.id} value={row.source.id}>
+                      {categoryLabel(row.source)} · {formatMoney(row.balance, locale)}
                     </option>
                   ))}
                 </select>
@@ -1235,7 +1725,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             <Field label={txText("note")}><Input name="note" maxLength={200} /></Field>
             {formError && <p role="alert" className="text-sm text-danger">{formError}</p>}
             <Button type="submit" disabled={saving}>{saving ? common("loading") : common("save")}</Button>
-          </form>
+            </form>
+          )}
         </CardContent></Card>
           <Card><CardContent className="p-5">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -1254,6 +1745,13 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             </div>
             {section === "transactions" && (
               <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-3">
+                <Field label={txText("filterSearch")}>
+                  <Input
+                    value={filterSearch}
+                    onChange={(event) => setFilterSearch(event.target.value)}
+                    placeholder={txText("filterSearchPlaceholder")}
+                  />
+                </Field>
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
@@ -1276,16 +1774,35 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   >
                     {txText("filterExpense")}
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setFiltersExpanded((expanded) => !expanded)}
+                    aria-expanded={filtersExpanded}
+                    className="ml-auto inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
+                  >
+                    {filtersExpanded ? txText("filterLess") : txText("filterMore")}
+                    {advancedFiltersCount > 0 && (
+                      <span className="rounded-full bg-accent/15 px-1.5 text-accent">
+                        {advancedFiltersCount}
+                      </span>
+                    )}
+                    <ChevronDown
+                      size={14}
+                      aria-hidden="true"
+                      className={`transition-transform ${filtersExpanded ? "rotate-180" : ""}`}
+                    />
+                  </button>
                   {filtersActive && (
                     <button
                       type="button"
                       onClick={resetFilters}
-                      className="ml-auto rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
+                      className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
                     >
                       {txText("filterReset")}
                     </button>
                   )}
                 </div>
+                {filtersExpanded && (
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   <Field label={txText("filterMonth")}>
                     <select
@@ -1382,14 +1899,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       onChange={(event) => setFilterMaxAmount(event.target.value)}
                     />
                   </Field>
-                  <Field label={txText("filterSearch")} className="sm:col-span-2 lg:col-span-2">
-                    <Input
-                      value={filterSearch}
-                      onChange={(event) => setFilterSearch(event.target.value)}
-                      placeholder={txText("filterSearch")}
-                    />
-                  </Field>
                 </div>
+                )}
               </div>
             )}
             {loading ? (
@@ -1441,83 +1952,119 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                           </div>
                         </div>
                         <ul className="divide-y divide-line">
-                          {monthTxs.map((transaction) => (
-                            <li key={transaction.id} className="flex items-center gap-3 py-3">
-                              <span
-                                className={
-                                  transaction.type === "income" ||
-                                  (transaction.type === "transfer" && transaction.transfer_direction !== "out")
-                                    ? "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"
-                                    : "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-surface2 text-muted"
-                                }
-                              >
-                                {transaction.type === "income" ||
-                                (transaction.type === "transfer" && transaction.transfer_direction !== "out") ? (
-                                  <ArrowDownLeft size={17} />
-                                ) : (
-                                  <ArrowUpRight size={17} />
-                                )}
-                              </span>
-                              <div className="min-w-0 flex-1">
-                                <p className="truncate text-sm font-medium text-ink">
-                                  {transaction.note || txText(transaction.type)}
-                                </p>
-                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                  {categoryLabel(transaction.category) && (
-                                    <span className="inline-flex items-center rounded-full border border-line bg-bg1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">
-                                      {categoryLabel(transaction.category)}
-                                    </span>
-                                  )}
-                                  {transaction.type === "expense" && transaction.funding && (
-                                    <span className="inline-flex items-center rounded-full border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent">
-                                      {txText("fundedBy")}: {categoryLabel(transaction.funding)}
-                                    </span>
-                                  )}
-                                  {vaultLabel(transaction.vault) && (
-                                    <span className="inline-flex items-center rounded-full border border-line bg-bg1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">
-                                      {vaultLabel(transaction.vault)}
-                                    </span>
-                                  )}
-                                  <span className="inline-flex items-center rounded-full border border-line bg-bg1 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">
-                                    {new Date(`${transaction.date}T00:00:00`).toLocaleDateString(
-                                      locale === "id" ? "id-ID" : "en-US"
-                                    )}
+                          {monthTxs.map((transaction) => {
+                            const incoming =
+                              transaction.type === "income" ||
+                              (transaction.type === "transfer" && transaction.transfer_direction !== "out");
+                            const isExpanded = expandedTxId === transaction.id;
+                            const formattedDate = new Date(`${transaction.date}T00:00:00`).toLocaleDateString(
+                              locale === "id" ? "id-ID" : "en-US"
+                            );
+                            const isEditing = editingTransaction?.id === transaction.id;
+                            return (
+                              <li key={transaction.id} className="py-1">
+                                <div className="flex items-center gap-3 py-2">
+                                  <span
+                                    className={
+                                      incoming
+                                        ? "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"
+                                        : "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-surface2 text-muted"
+                                    }
+                                  >
+                                    {incoming ? <ArrowDownLeft size={17} /> : <ArrowUpRight size={17} />}
                                   </span>
+                                  <div className="min-w-0 flex-1">
+                                    <p className="truncate text-sm font-medium text-ink">
+                                      {transaction.note || txText(transaction.type)}
+                                    </p>
+                                    <p className="mt-0.5 text-xs text-faint">
+                                      {formattedDate}
+                                      {categoryLabel(transaction.category) ? ` · ${categoryLabel(transaction.category)}` : ""}
+                                    </p>
+                                  </div>
+                                  <span
+                                    className={
+                                      transaction.type === "income"
+                                        ? "num w-32 shrink-0 text-right text-sm font-semibold text-accent"
+                                        : transaction.type === "expense"
+                                          ? "num w-32 shrink-0 text-right text-sm font-semibold text-danger"
+                                          : "num w-32 shrink-0 text-right text-sm font-semibold text-ink"
+                                    }
+                                  >
+                                    {incoming ? "+" : "−"}
+                                    {formatMoney(transaction.amount, locale)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setExpandedTxId(isExpanded ? null : transaction.id)}
+                                    aria-expanded={isExpanded}
+                                    aria-label={txText("details")}
+                                    className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                                  >
+                                    <ChevronDown size={16} className={`transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                                  </button>
+                                  {transaction.type !== "transfer" && !transaction.group_id ? (
+                                    <button
+                                      type="button"
+                                      disabled={savingEdit}
+                                      onClick={() => { if (isEditing) { setEditingTransaction(null); setEditError(""); return; } setEditError(""); setEditingTransaction(transaction); setEditVaultId(transaction.vault_id ?? ""); setEditFundingSourceId(transaction.funding_source_id ?? ""); }}
+                                      aria-label={txText("editTitle")}
+                                      className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                                    >
+                                      <Pencil size={16} />
+                                    </button>
+                                  ) : (
+                                    <span aria-hidden="true" className="h-8 w-8 shrink-0" />
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => void removeTransaction(transaction.id)}
+                                    aria-label={common("delete")}
+                                    className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-danger"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
                                 </div>
-                              </div>
-                              <span
-                                className={
-                                  transaction.type === "income" ||
-                                  (transaction.type === "transfer" && transaction.transfer_direction !== "out")
-                                    ? "num text-sm font-semibold text-accent"
-                                    : "num text-sm font-semibold text-ink"
-                                }
-                              >
-                                {transaction.type === "income" ||
-                                (transaction.type === "transfer" && transaction.transfer_direction !== "out") ? "+" : "−"}
-                                {formatMoney(transaction.amount, locale)}
-                              </span>
-                              {transaction.type !== "transfer" && !transaction.group_id && (
-                                <button
-                                  type="button"
-                                  disabled={savingEdit}
-                                  onClick={() => { setEditError(""); setEditingTransaction(transaction); }}
-                                  aria-label={txText("editTitle")}
-                                  className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
-                                >
-                                  <Pencil size={16} />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => void removeTransaction(transaction.id)}
-                                aria-label={common("delete")}
-                                className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-danger"
-                              >
-                                <Trash2 size={16} />
-                              </button>
-                            </li>
-                          ))}
+                                {isEditing && transactionEditForm(transaction)}
+                                {isExpanded && !isEditing && (
+                                  <dl className="mb-2 grid gap-x-6 gap-y-2 rounded-xl border border-line bg-bg1/60 p-3 text-xs sm:grid-cols-2">
+                                    <div>
+                                      <dt className="text-faint">{txText("type")}</dt>
+                                      <dd className="mt-0.5 text-ink">{txText(transaction.type)}</dd>
+                                    </div>
+                                    <div>
+                                      <dt className="text-faint">{txText("date")}</dt>
+                                      <dd className="mt-0.5 text-ink">{formattedDate}</dd>
+                                    </div>
+                                    {categoryLabel(transaction.category) && (
+                                      <div>
+                                        <dt className="text-faint">{txText("category")}</dt>
+                                        <dd className="mt-0.5 text-ink">{categoryLabel(transaction.category)}</dd>
+                                      </div>
+                                    )}
+                                    {transaction.type === "expense" && transaction.funding && (
+                                      <div>
+                                        <dt className="text-faint">{txText("fundingSource")}</dt>
+                                        <dd className="mt-0.5 text-ink">{categoryLabel(transaction.funding)}</dd>
+                                      </div>
+                                    )}
+                                    {vaultLabel(transaction.vault) && (
+                                      <div>
+                                        <dt className="text-faint">{txText("sourceVault")}</dt>
+                                        <dd className="mt-0.5 text-ink">{vaultLabel(transaction.vault)}</dd>
+                                      </div>
+                                    )}
+                                    {transaction.note && (
+                                      <div className="sm:col-span-2">
+                                        <dt className="text-faint">{txText("note")}</dt>
+                                        <dd className="mt-0.5 text-ink">{transaction.note}</dd>
+                                      </div>
+                                    )}
+                                  </dl>
+                                )}
+                              </li>
+                            );
+                          })}
                         </ul>
                       </section>
                     );
@@ -1552,7 +2099,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       className={
                         transaction.type === "income"
                           ? "num text-sm font-semibold text-accent"
-                          : "num text-sm font-semibold text-ink"
+                          : transaction.type === "expense"
+                            ? "num text-sm font-semibold text-danger"
+                            : "num text-sm font-semibold text-ink"
                       }
                     >
                       {transaction.type === "income" ? "+" : "−"}

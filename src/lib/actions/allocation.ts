@@ -41,10 +41,11 @@ export async function saveAllocationRule(
 
   // Jika aturan baru dibuat sebagai aktif, pastikan hanya aturan ini yang aktif.
   if (input.isActive) {
-    await supabase
+    const { error: deactivateError } = await supabase
       .from("allocation_rules")
       .update({ is_active: false })
       .eq("user_id", user.id);
+    if (deactivateError) return { ok: false, error: "err.generic" };
   }
 
   const { data: rule, error: ruleError } = await supabase
@@ -86,11 +87,19 @@ export async function deleteAllocationRule(
   ruleId: string
 ): Promise<ActionResult> {
   const supabase = await createClient();
-  const { error } = await supabase
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  const { data, error } = await supabase
     .from("allocation_rules")
     .delete()
-    .eq("id", ruleId);
+    .eq("id", ruleId)
+    .eq("user_id", user.id)
+    .select("id");
   if (error) return { ok: false, error: "err.generic" };
+  if (!data || data.length === 0) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/allocation`);
   return { ok: true };
@@ -108,16 +117,22 @@ export async function setActiveRule(
   if (!user) return { ok: false, error: "err.auth" };
 
   if (active) {
-    await supabase
+    const { error: deactivateError } = await supabase
       .from("allocation_rules")
       .update({ is_active: false })
       .eq("user_id", user.id)
       .neq("id", ruleId);
+    if (deactivateError) return { ok: false, error: "err.generic" };
   }
-  await supabase
+
+  const { data, error } = await supabase
     .from("allocation_rules")
     .update({ is_active: active })
-    .eq("id", ruleId);
+    .eq("id", ruleId)
+    .eq("user_id", user.id)
+    .select("id");
+  if (error) return { ok: false, error: "err.generic" };
+  if (!data || data.length === 0) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/allocation`);
   return { ok: true };

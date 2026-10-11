@@ -1,5 +1,6 @@
 "use server";
 
+import { describeSupabaseError } from "@/src/lib/supabase/errors";
 import { createClient } from "@/src/lib/supabase/server";
 
 const BACKUP_MAX_BYTES = 10 * 1024 * 1024;
@@ -13,9 +14,16 @@ const BACKUP_TABLES = [
   "recurring_transactions",
 ] as const;
 
+export type BackupRestoreError =
+  | "backup.auth"
+  | "backup.format"
+  | "backup.owner"
+  | "backup.reference"
+  | "backup.restore";
+
 export type BackupRestoreResult =
   | { ok: true; restoredRows: number }
-  | { ok: false; error: "backup.auth" | "backup.format" | "backup.owner" | "backup.restore" };
+  | { ok: false; error: BackupRestoreError; detail?: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -62,10 +70,15 @@ export async function restoreFinancialBackup(backup: unknown): Promise<BackupRes
     p_backup: backup,
   });
   if (error) {
-    console.error("Supabase backup restore failed.", { code: error.code, message: error.message });
+    console.error(describeSupabaseError("Supabase backup restore failed.", error));
     if (error.message === "err.backupOwner") return { ok: false, error: "backup.owner" };
     if (error.message === "err.backupFormat") return { ok: false, error: "backup.format" };
-    return { ok: false, error: "backup.restore" };
+    if (error.message === "err.backupReference") return { ok: false, error: "backup.reference" };
+    return {
+      ok: false,
+      error: "backup.restore",
+      detail: [error.code, error.message].filter(Boolean).join(": "),
+    };
   }
   return { ok: true, restoredRows: Number(data) };
 }

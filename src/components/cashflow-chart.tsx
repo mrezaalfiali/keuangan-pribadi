@@ -61,6 +61,13 @@ export function CashflowChart({
       currency: "IDR",
       maximumFractionDigits: 0,
     }).format(value);
+  const axisMoney = (value: number) =>
+    new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency: "IDR",
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
 
   return (
     <Card>
@@ -103,8 +110,8 @@ export function CashflowChart({
                   <YAxis
                     tick={AXIS_TICK}
                     {...AXIS_PROPS}
-                    width={72}
-                    tickFormatter={(value: number) => money(value)}
+                    width={88}
+                    tickFormatter={(value: number) => axisMoney(value)}
                   />
                   <Tooltip
                     contentStyle={TOOLTIP_STYLE}
@@ -134,17 +141,14 @@ export function CashflowChart({
                   <YAxis
                     tick={AXIS_TICK}
                     {...AXIS_PROPS}
-                    width={72}
-                    tickFormatter={(value: number) => money(value)}
+                    width={88}
+                    tickFormatter={(value: number) => axisMoney(value)}
                   />
                   <Tooltip
                     cursor={{ fill: "var(--surface2)" }}
                     contentStyle={TOOLTIP_STYLE}
                     labelFormatter={(label) => String(label)}
-                    formatter={(value, name) => [
-                      money(Number(value ?? 0)),
-                      name === "income" ? dashboard("income") : dashboard("expense"),
-                    ]}
+                    formatter={(value, name) => [money(Number(value ?? 0)), String(name)]}
                   />
                   <Bar dataKey="income" name={dashboard("income")} fill="var(--accent)" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="expense" name={dashboard("expense")} fill="var(--danger)" radius={[4, 4, 0, 0]} />

@@ -18,6 +18,7 @@ import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/src/i18n/navigation";
 import { cn } from "@/src/lib/utils";
 import { ThemeToggle } from "@/src/components/theme-toggle";
+import { SocialLinks } from "@/src/components/social-links";
 import { LocaleSwitcher } from "@/src/components/locale-switcher";
 import { signOutAction } from "@/src/lib/actions/auth";
 
@@ -140,35 +141,7 @@ export function AppShell({
               <p className="font-medium text-ink">Moh. Reza Alfi Ali</p>
               <p className="mt-1 text-faint">© {new Date().getFullYear()} All rights reserved</p>
             </div>
-            <div className="flex items-center gap-4">
-              <a
-                href="https://www.instagram.com/mrezaaaxx/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="transition-colors hover:text-ink"
-                aria-label="Instagram"
-              >
-                Instagram
-              </a>
-              <a
-                href="https://www.linkedin.com/in/mohrezaalfiali/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="transition-colors hover:text-ink"
-                aria-label="LinkedIn"
-              >
-                LinkedIn
-              </a>
-              <a
-                href="https://github.com/mrezaalfiali"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="transition-colors hover:text-ink"
-                aria-label="GitHub"
-              >
-                GitHub
-              </a>
-            </div>
+            <SocialLinks />
           </div>
         </footer>
         <nav

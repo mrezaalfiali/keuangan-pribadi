@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter } from "@/src/i18n/navigation";
-import { Calculator, Download, Flame, LockKeyhole, LockKeyholeOpen, Plus, Sparkles, Target, Trash2, Trophy, Upload, Wallet } from "lucide-react";
+import { Calculator, Download, Flame, LockKeyhole, LockKeyholeOpen, Plus, Sparkles, Target, Trash2, Trophy, Upload, UserRound, Wallet } from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { Card, CardContent } from "@/src/components/ui/card";
+import { SocialLinks } from "@/src/components/social-links";
 import { Field, Input } from "@/src/components/ui/input";
 import { Progress } from "@/src/components/ui/progress";
 import { createVault, deleteVault, toggleVaultLock } from "@/src/lib/actions/vaults";
@@ -14,6 +15,7 @@ import { deleteAllocationRule, saveAllocationRule, setActiveRule } from "@/src/l
 import { saveDisplayName } from "@/src/lib/actions/profile";
 import { exportJson } from "@/src/lib/actions/export";
 import { restoreFinancialBackup } from "@/src/lib/actions/backup";
+import { resetFinancialData } from "@/src/lib/actions/reset";
 import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { previewAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
@@ -104,6 +106,8 @@ export function SupabaseToolsPage({ section }: Props) {
   const [budgetScope, setBudgetScope] = useState<BudgetScope>("category");
   const [budgetScopeId, setBudgetScopeId] = useState("");
   const [budgetNotice, setBudgetNotice] = useState("");
+  const [resetPhrase, setResetPhrase] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -383,9 +387,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
     }
   }
 
-  async function exportData() {
-    setSaving(true);
-    setError("");
+  async function downloadBackup(): Promise<boolean> {
     try {
       const backup = await exportJson();
       const blob = new Blob([backup.data], { type: "application/json" });
@@ -395,11 +397,51 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       anchor.download = backup.filename;
       anchor.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      return true;
     } catch (exportError) {
       console.error("Supabase export failed.", exportError);
-      setError(settings("exportError"));
+      return false;
+    }
+  }
+
+  async function exportData() {
+    setSaving(true);
+    setError("");
+    try {
+      if (!(await downloadBackup())) setError(settings("exportError"));
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Mulai dari nol: unduh backup dulu sebagai pengaman, lalu hapus semua
+   * data keuangan + reward milik user. Butuh konfirmasi mengetik "RESET".
+   */
+  async function runReset() {
+    if (resetPhrase !== "RESET") return;
+    if (!window.confirm(settings("resetConfirm"))) return;
+    setResetting(true);
+    setError("");
+    setNotice("");
+    try {
+      if (!(await downloadBackup())) {
+        setError(settings("exportError"));
+        return;
+      }
+      const result = await resetFinancialData(locale);
+      if (!result.ok) {
+        setError(settings("resetError"));
+        return;
+      }
+      setResetPhrase("");
+      setNotice(settings("resetDone"));
+      await load();
+    } catch (resetError) {
+      console.error("Supabase financial reset failed.", resetError);
+      setError(settings("resetError"));
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -437,12 +479,14 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       if (!window.confirm(settings("restoreConfirm", { rows: rowCount }))) return;
       const result = await restoreFinancialBackup(backup);
       if (!result.ok) {
-        const errorMessage = result.error === "backup.owner"
+        const message = result.error === "backup.owner"
           ? settings("backupOwnerError")
           : result.error === "backup.format"
             ? settings("backupFormatError")
-            : settings("restoreError");
-        setError(errorMessage);
+            : result.error === "backup.reference"
+              ? settings("restoreReferenceError")
+              : settings("restoreError");
+        setError(result.detail ? `${message} (${result.detail})` : message);
         return;
       }
       setNotice(settings("restoreSuccess", { rows: result.restoredRows }));
@@ -609,7 +653,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
         })()}
 
         {section === "about" && <section className="space-y-5">
-          <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.9fr)]">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.9fr)]">
             <Card className="overflow-hidden border-0 bg-gradient-to-br from-surface via-surface to-bg1 shadow-[0_12px_30px_rgba(17,24,39,0.06)]">
               <CardContent className="p-0">
                 <div className="border-b border-line bg-gradient-to-r from-accent/6 via-transparent to-surface p-5 sm:p-6">
@@ -658,8 +702,8 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               </CardContent>
             </Card>
 
-            <Card className="overflow-hidden border-0 bg-surface shadow-[0_10px_26px_rgba(15,23,42,0.05)]">
-              <CardContent className="p-5 sm:p-6">
+            <Card className="flex flex-col overflow-hidden border-0 bg-surface shadow-[0_10px_26px_rgba(15,23,42,0.05)]">
+              <CardContent className="flex flex-1 flex-col p-5 sm:p-6">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-display text-xl font-semibold text-ink">{t("profileTitle")}</h2>
                   <span className="grid h-10 w-10 place-items-center rounded-full bg-accent/10 text-accent">
@@ -669,30 +713,36 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
 
                 <div className="mt-5 rounded-3xl border border-line bg-gradient-to-br from-bg1 to-surface p-4">
                   <div className="flex items-center gap-3">
-                    <div className="grid h-14 w-14 place-items-center rounded-2xl bg-surface2 text-lg font-bold text-ink">
-                      M
+                    <div className="grid h-14 w-14 place-items-center rounded-2xl bg-surface2 text-ink">
+                      <UserRound size={26} />
                     </div>
                     <div>
                       <p className="text-xs uppercase tracking-[0.2em] text-muted">{t("developer")}</p>
                       <p className="mt-1 text-lg font-semibold text-ink">Moh. Reza Alfi Ali</p>
                     </div>
                   </div>
+                  <SocialLinks className="mt-4" />
                 </div>
 
-                <div className="mt-5 space-y-3">
-                  <div className="rounded-2xl border border-line bg-bg1/60 p-3.5">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">{t("profileName")}</p>
-                    <p className="mt-2 text-base font-semibold text-ink">{profile?.display_name || "Nexora User"}</p>
+                <div className="mt-5 flex flex-1 flex-col rounded-2xl border border-line bg-bg1/60 p-4">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-faint">{t("developerInfo")}</p>
+                    <dl className="mt-3 space-y-2.5 text-sm">
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-muted">{t("roleLabel")}</dt>
+                        <dd className="font-medium text-ink">{t("roleValue")}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-muted">{t("locationLabel")}</dt>
+                        <dd className="font-medium text-ink">{t("locationValue")}</dd>
+                      </div>
+                    </dl>
                   </div>
-                  <div className="rounded-2xl border border-line bg-bg1/60 p-3.5">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-muted">{t("profileEmail")}</p>
-                    <p className="mt-2 break-all text-base font-semibold text-ink">{email || "-"}</p>
-                  </div>
-                </div>
 
-                <div className="mt-5 rounded-2xl border border-dashed border-accent/30 bg-accent/5 p-3.5">
-                  <p className="text-xs uppercase tracking-[0.2em] text-muted">Focus</p>
-                  <p className="mt-2 text-sm leading-6 text-muted">Membantu Anda membangun kebiasaan finansial yang lebih sehat, terukur, dan konsisten.</p>
+                  <div className="mt-auto border-t border-line pt-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted">Focus</p>
+                    <p className="mt-2 text-sm leading-6 text-muted">Membantu Anda membangun kebiasaan finansial yang lebih sehat, terukur, dan konsisten.</p>
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -700,8 +750,8 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
         </section>}
 
         {section === "settings" && <section className="space-y-5">
-          <div className="grid items-start gap-5 lg:grid-cols-2">
-            <Card><CardContent className="p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("profile")}</h2><form onSubmit={saveProfile} className="mt-5 flex flex-col gap-4"><Field label={t("displayName")}><Input name="displayName" defaultValue={profile?.display_name ?? ""} maxLength={64} required /></Field><Field label={auth("email")}><Input value={email} readOnly /></Field><Button type="submit" disabled={saving}>{common("save")}</Button></form></CardContent></Card>
+          <div className="grid gap-5 lg:grid-cols-2">
+            <Card className="flex flex-col"><CardContent className="flex flex-1 flex-col p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("profile")}</h2><p className="mt-2 text-sm text-muted">{t("profileDesc")}</p><form onSubmit={saveProfile} className="mt-5 flex flex-1 flex-col gap-4"><Field label={t("displayName")} hint={t("displayNameHint")}><Input name="displayName" defaultValue={profile?.display_name ?? ""} maxLength={64} required /></Field><Field label={auth("email")}><Input value={email} readOnly /></Field><div className="mt-auto rounded-2xl border border-line bg-bg1/60 p-3.5"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-faint">{t("accountInfo")}</p><div className="mt-2.5 flex items-center justify-between gap-3 text-sm"><span className="text-muted">{t("memberSince")}</span><span className="text-ink">{profile?.created_at ? new Date(profile.created_at).toLocaleDateString(locale === "id" ? "id-ID" : "en-US", { year: "numeric", month: "long", day: "numeric" }) : "—"}</span></div></div><Button type="submit" className="mt-4" disabled={saving}>{common("save")}</Button></form></CardContent></Card>
             <Card><CardContent className="p-5">
               <h2 className="font-display text-lg font-semibold text-ink">{t("exportTitle")}</h2>
               <p className="mt-2 text-sm text-muted">{settings("backupDesc")}</p>
@@ -711,7 +761,24 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 <input ref={backupInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => void restoreData(event)} />
               </div>
               <p className="mt-3 text-xs text-muted">{settings("backupMergeNote")}</p>
-              <div className="mt-8 border-t border-line pt-5"><h3 className="font-semibold text-ink">{t("danger")}</h3><p className="mt-1 text-sm text-muted">{settings("cloudDeleteWarning")}</p></div>
+              <div className="mt-8 border-t border-line pt-5"><h3 className="font-semibold text-ink">{t("danger")}</h3><p className="mt-1 text-sm text-muted">{settings("cloudDeleteWarning")}</p>
+                <div className="mt-4 rounded-2xl border border-danger/30 bg-danger/5 p-4">
+                  <p className="font-medium text-ink">{settings("resetTitle")}</p>
+                  <p className="mt-1 text-sm text-muted">{settings("resetWarning")}</p>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Input
+                      value={resetPhrase}
+                      onChange={(event) => setResetPhrase(event.target.value)}
+                      placeholder={settings("resetPhraseLabel")}
+                      aria-label={settings("resetPhraseLabel")}
+                      disabled={resetting}
+                    />
+                    <Button type="button" variant="danger" className="shrink-0" disabled={resetting || resetPhrase !== "RESET"} onClick={() => void runReset()}>
+                      {resetting ? common("loading") : settings("resetButton")}
+                    </Button>
+                  </div>
+                </div>
+              </div>
             </CardContent></Card>
           </div>
           <Card><CardContent className="p-5 sm:p-6">
@@ -727,7 +794,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 </li>
               ))}
             </ol>
-            <div className="mt-6 grid gap-x-6 gap-y-4 sm:grid-cols-2">
+            <div className="mt-6 grid auto-rows-fr gap-3 sm:grid-cols-2">
               {([
                 ["guideDashboardTitle", "guideDashboard"],
                 ["guideTransactionsTitle", "guideTransactions"],
@@ -736,8 +803,9 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 ["guideAllocationTitle", "guideAllocation"],
                 ["guideRewardsTitle", "guideRewards"],
                 ["guideCalculatorTitle", "guideCalculator"],
+                ["guideSettingsTitle", "guideSettings"],
               ] as const).map(([titleKey, descriptionKey]) => (
-                <div key={titleKey} className="border-t border-line pt-3">
+                <div key={titleKey} className="h-full rounded-xl border border-line bg-bg1/60 p-3">
                   <h3 className="text-sm font-semibold text-ink">{t(titleKey)}</h3>
                   <p className="mt-1 text-sm leading-relaxed text-muted">{t(descriptionKey)}</p>
                 </div>

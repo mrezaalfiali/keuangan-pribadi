@@ -11,6 +11,9 @@
  * is derived from the ledger.
  */
 
+import { vaultBalanceDelta, type TransferDirection } from "./vault-ledger";
+import type { TxType } from "./types";
+
 /** The slice of a transaction these helpers need. */
 export interface SourceTransaction {
   type: string;
@@ -79,6 +82,76 @@ export function computeSourceBalances(
   }
 
   return balances;
+}
+
+/**
+ * The slice of a transaction needed to derive per-source-per-vault balances.
+ *
+ * A source only owns money that actually sits in a vault, so the vault matters:
+ * the same source can hold `2 juta` in "Tabungan" and `500 ribu` in "Darat",
+ * and an expense from "Tabungan" must not silently drain the "Darat" money.
+ */
+export interface PairTransaction {
+  type: TxType;
+  amount: number;
+  category_id?: string | null;
+  funding_source_id?: string | null;
+  vault_id?: string | null;
+  transfer_direction?: TransferDirection;
+}
+
+/** Key for one (income source, vault) pool. */
+export function sourceVaultKey(sourceId: string, vaultId: string): string {
+  return `${sourceId}:${vaultId}`;
+}
+
+function bump(map: Map<string, number>, key: string, delta: number) {
+  map.set(key, (map.get(key) ?? 0) + delta);
+}
+
+/**
+ * Running balance per (income source, vault) pair.
+ *
+ * This is the fine-grained version of `computeSourceBalances`: instead of one
+ * figure per source it keeps one figure per source *per vault*, so the app can
+ * tell that "Gaji" only has money in "Tabungan" and therefore cannot fund an
+ * expense paid from "Darat". The delta per row mirrors the vault ledger exactly
+ * (`vaultBalanceDelta`): income and transfer-in add, expense and transfer-out
+ * subtract, so summing every pair for a vault reproduces that vault's balance.
+ *
+ * Rows without a vault, without a source, or with a non-finite amount are
+ * skipped — they cannot be attributed to any pool.
+ */
+export function computeSourceVaultBalances(
+  transactions: PairTransaction[]
+): Map<string, number> {
+  const balances = new Map<string, number>();
+
+  for (const tx of transactions) {
+    const amount = Number(tx.amount);
+    if (!Number.isFinite(amount)) continue;
+    if (!tx.vault_id) continue;
+
+    let sourceId: string | null | undefined;
+    if (tx.type === "income") sourceId = tx.category_id;
+    else if (tx.type === "expense" || tx.type === "transfer") sourceId = tx.funding_source_id;
+    else continue;
+    if (!sourceId) continue;
+
+    const delta = vaultBalanceDelta(tx.type, amount, tx.transfer_direction);
+    bump(balances, sourceVaultKey(sourceId, tx.vault_id), delta);
+  }
+
+  return balances;
+}
+
+/** Saldo satu pool (sumber, vault); 0 kalau belum pernah tersentuh. */
+export function sourceVaultBalance(
+  balances: Map<string, number>,
+  sourceId: string,
+  vaultId: string
+): number {
+  return balances.get(sourceVaultKey(sourceId, vaultId)) ?? 0;
 }
 
 /** Per-source income, expense and balance, in the order the sources were given. */

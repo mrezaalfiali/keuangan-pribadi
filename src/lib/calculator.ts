@@ -227,7 +227,7 @@ export function evaluateArithmetic(expression: string): ArithmeticResult {
   function parseTerm(): number {
     let value = parseFactor();
     for (;;) {
-      if (eat("*")) value *= parseFactor();
+      if (eat("*") || eat("x") || eat("X")) value *= parseFactor();
       else if (eat("/")) {
         const divisor = parseFactor();
         if (divisor === 0) throw new Error("divideByZero");

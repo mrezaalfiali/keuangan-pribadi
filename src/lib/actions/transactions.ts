@@ -2,9 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
-import { distributeAllocation, validateSlots } from "@/src/lib/allocation";
+import { distributeAllocation, resolveIncomeAllocation, validateSlots, type AllocationMode } from "@/src/lib/allocation";
 import { todayISO } from "@/src/lib/utils";
-import { vaultBalanceDelta } from "@/src/lib/vault-ledger";
+import { vaultBalanceDelta, expenseVaultError } from "@/src/lib/vault-ledger";
+import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 import type { AllocationSlot, Transaction } from "../types";
 
 export interface TxResult {
@@ -51,6 +52,11 @@ export async function addTransaction(
     vaultId?: string | null;
     destinationVaultId?: string | null;
     note?: string | null;
+    /**
+     * Untuk income: `auto` (default) membagi nominal lewat aturan alokasi,
+     * `single` mengirim seluruh nominal ke `vaultId`.
+     */
+    allocationMode?: AllocationMode | null;
   }
 ): Promise<TxResult> {
   const supabase = await createClient();
@@ -89,26 +95,67 @@ export async function addTransaction(
   };
 
   if (input.type === "income") {
-    base.category_id = input.categoryId ?? null;
+    // Pemasukan tanpa sumber membuat uang muncul di vault tanpa bisa
+    // dibelanjakan (tidak ada pool sumber×vault yang bisa dipakai). Kalau
+    // pemanggil tidak memilih sumber, pakai sumber sistem "Lainnya".
+    const source = await resolveIncomeSourceId(supabase, user.id, input.categoryId ?? null);
+    if (!source.ok) return { ok: false, error: source.error };
+    // Vault tujuan pemasukan harus milik pengguna; kalau tidak, uangnya akan
+    // mendarat di ledger orang lain (RLS menolak, tapi errornya jadi generik).
+    if (input.vaultId) {
+      const { data: vault, error: vaultError } = await supabase
+        .from("vaults")
+        .select("id")
+        .eq("id", input.vaultId)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (vaultError) return { ok: false, error: "err.generic" };
+      if (!vault) return { ok: false, error: "transactions.vaultRequired" };
+    }
+    base.category_id = source.id;
     base.vault_id = input.vaultId ?? null;
   } else if (input.type === "expense") {
     base.category_id = input.categoryId ?? null;
     base.vault_id = input.vaultId ?? null;
-    // The funding source is checked server-side so the browser cannot be the
-    // only thing standing between an expense and a negative source balance.
-    const check = await checkSourceBalance(supabase, user.id, input.fundingSourceId, amount);
+    // Uang harus keluar dari vault nyata: wajib dipilih, tidak terkunci, dan
+    // saldonya cukup. Tanpa ini, kunci vault bisa dilewati lewat sumber
+    // pemasukan, dan saldo vault bisa menjadi negatif.
+    const vaultCheck = await checkExpenseVault(supabase, user.id, input.vaultId ?? null, amount);
+    if (vaultCheck) return { ok: false, error: vaultCheck };
+    // Uang dari sebuah sumber hanya boleh keluar dari vault yang benar-benar
+    // menyimpannya. Cek agregat sumber saja tidak cukup: dua vault bisa berisi
+    // sumber yang sama, dan tanpa cek pasangan ini pengeluaran dari satu vault
+    // bisa menghabiskan saldo sumber yang sebenarnya ada di vault lain.
+    const check = await checkSourceVaultBalance(
+      supabase,
+      user.id,
+      input.fundingSourceId,
+      input.vaultId ?? null,
+      amount
+    );
     if (!check.ok) return check;
     base.funding_source_id = input.fundingSourceId ?? null;
   } else {
     // transfer
     base.vault_id = input.vaultId ?? null;
     base.transfer_direction = "out";
+    // Transfer memindahkan uang milik satu sumber: kolam (sumber × vault asal)
+    // ikut berpindah, sehingga baris keluar dan masuk membawa sumber yang sama.
+    base.funding_source_id = input.fundingSourceId ?? null;
   }
 
-  // New income is split across vaults by the active allocation rule, so the
-  // insert becomes one row per slot. Only new rows are affected — nothing here
-  // reads or rewrites income that was recorded before this ran.
+  // Income either follows the active allocation rule or lands whole in one
+  // chosen vault; the caller states which through `allocationMode`. Only new
+  // rows are affected — nothing here reads or rewrites income recorded before
+  // this ran.
+  let applyAllocation = false;
   if (input.type === "income") {
+    const mode = resolveIncomeAllocation(input.allocationMode, input.vaultId ?? null);
+    if (!mode.ok) return { ok: false, error: "transactions.vaultRequired" };
+    applyAllocation = mode.applyAllocation;
+  }
+
+  if (input.type === "income" && applyAllocation) {
     const split = await planAllocation(supabase, user.id, amount);
     if (split) {
       const groupId = crypto.randomUUID();
@@ -116,13 +163,21 @@ export async function addTransaction(
         split.map((row) => ({ ...base, group_id: groupId, ...row }))
       );
       if (splitError) return { ok: false, error: "err.generic" };
-    } else {
+    } else if (base.vault_id) {
       const { error: incomeError } = await supabase.from("transactions").insert(base);
       if (incomeError) return { ok: false, error: "err.generic" };
+    } else {
+      // Mode "auto" tanpa aturan aktif (atau aturan tidak valid) tidak punya
+      // vault tujuan. Menyimpannya dengan vault_id null membuat uang tak bisa
+      // dibelanjakan, jadi ditolak dengan pesan yang bisa ditindaklanjuti.
+      return { ok: false, error: "transactions.allocationRuleRequired" };
     }
   } else if (input.type === "transfer") {
     const sourceVaultId = input.vaultId;
     const destinationVaultId = input.destinationVaultId;
+    if (!input.fundingSourceId) {
+      return { ok: false, error: "transactions.noSource" };
+    }
     if (
       !sourceVaultId ||
       !destinationVaultId ||
@@ -142,25 +197,16 @@ export async function addTransaction(
       return { ok: false, error: "transactions.lockedError" };
     }
 
+    // Transfer hanya boleh menarik dari kolam sumber yang benar-benar mengisi
+    // vault asal; saldo vault agregat tak cukup karena bisa berisi sumber lain.
     const { data: ledger, error: ledgerError } = await supabase
       .from("transactions")
-      .select("type, amount, vault_id, transfer_direction")
+      .select("type, amount, category_id, funding_source_id, vault_id, transfer_direction")
       .eq("user_id", user.id);
     if (ledgerError) return { ok: false, error: "err.generic" };
-    const sourceBalance = (ledger ?? []).reduce(
-      (balance, transaction) =>
-        transaction.vault_id === sourceVaultId
-          ? balance +
-            vaultBalanceDelta(
-              transaction.type,
-              transaction.amount,
-              transaction.transfer_direction
-            )
-          : balance,
-      0
-    );
-    if (sourceBalance < amount) {
-      return { ok: false, error: "transactions.insufficient" };
+    const balances = computeSourceVaultBalances((ledger ?? []) as PairTransaction[]);
+    if (sourceVaultBalance(balances, input.fundingSourceId, sourceVaultId) < amount) {
+      return { ok: false, error: "transactions.sourceNotInVault" };
     }
 
     const groupId = crypto.randomUUID();
@@ -267,18 +313,98 @@ async function planAllocation(
 }
 
 /**
- * Menolak expense yang sumber dananya kurang, atau yang menunjuk kategori
- * yang bukan sumber pemasukan milik pengguna.
+ * Menolak pengeluaran yang vault-nya tidak sah, atau mengembalikan `null`
+ * kalau boleh lanjut.
  *
- * Balance dihitung dari ledger, bukan disimpan: income menambah ke
- * `category_id`-nya, expense mengurangi dari `funding_source_id`. Expense lama
- * tanpa sumber (`funding_source_id` null) diabaikan agar saldo sumber tetap
- * konsisten dengan apa yang dilihat pengguna di dashboard.
+ * Saldo vault dihitung dari ledger (income/transfer-in menambah, expense/
+ * transfer-out mengurangi), sama seperti perhitungan di `vaultTransfer`, supaya
+ * angka yang dilihat pengguna sama dengan yang divalidasi server.
  */
-async function checkSourceBalance(
+async function checkExpenseVault(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  vaultId: string | null,
+  amount: number
+): Promise<string | null> {
+  if (!vaultId) return expenseVaultError(null, amount);
+
+  const { data: vault, error: vaultError } = await supabase
+    .from("vaults")
+    .select("id, is_locked")
+    .eq("id", vaultId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (vaultError) return "err.generic";
+  if (!vault) return expenseVaultError(null, amount);
+
+  const { data: ledger, error: ledgerError } = await supabase
+    .from("transactions")
+    .select("type, amount, vault_id, transfer_direction")
+    .eq("user_id", userId);
+  if (ledgerError) return "err.generic";
+
+  const balance = ((ledger ?? []) as Pick<
+    Transaction,
+    "type" | "amount" | "vault_id" | "transfer_direction"
+  >[]).reduce((sum, tx) => {
+    if (tx.vault_id !== vaultId) return sum;
+    return sum + vaultBalanceDelta(tx.type, tx.amount, tx.transfer_direction);
+  }, 0);
+
+  return expenseVaultError({ is_locked: vault.is_locked, balance }, amount);
+}
+
+/**
+ * Menentukan sumber pemasukan yang sah untuk sebuah income. Sumber yang
+ * dipilih diverifikasi milik pengguna (atau kategori sistem) dan bertipe
+ * `income`; kalau kosong, dipakai sumber sistem "Lainnya" supaya income selalu
+ * punya pool sumber×vault dan uangnya bisa dibelanjakan kembali.
+ */
+async function resolveIncomeSourceId(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  categoryId: string | null
+): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
+  if (categoryId) {
+    const { data, error } = await supabase
+      .from("categories")
+      .select("id, type")
+      .eq("id", categoryId)
+      .or(`user_id.is.null,user_id.eq.${userId}`)
+      .maybeSingle();
+    if (error) return { ok: false, error: "err.generic" };
+    if (!data || data.type !== "income") return { ok: false, error: "err.category" };
+    return { ok: true, id: data.id };
+  }
+
+  const { data, error } = await supabase
+    .from("categories")
+    .select("id")
+    .eq("type", "income")
+    .eq("is_system", true)
+    .in("slug", ["lainnya-in", "lainnya"])
+    .limit(1)
+    .maybeSingle();
+  if (error) return { ok: false, error: "err.generic" };
+  if (!data) return { ok: false, error: "err.category" };
+  return { ok: true, id: data.id };
+}
+
+/**
+ * Menolak expense yang sumber dananya tidak punya saldo di vault yang dipilih,
+ * atau yang menunjuk kategori yang bukan sumber pemasukan milik pengguna.
+ *
+ * Saldo dihitung dari pasangan (sumber, vault), bukan dari total sumber:
+ * uang "Gaji" yang tersimpan di "Tabungan" tidak boleh membiayai pengeluaran
+ * dari "Darat" hanya karena total sumbernya terlihat cukup. Income menambah
+ * pool `category_id`-nya, expense/transfer mengurangi pool `funding_source_id`,
+ * sama seperti `computeSourceVaultBalances` di klien.
+ */
+async function checkSourceVaultBalance(
   supabase: Awaited<ReturnType<typeof createClient>>,
   userId: string,
   fundingSourceId: string | null | undefined,
+  vaultId: string | null,
   amount: number
 ): Promise<TxResult> {
   if (!fundingSourceId) return { ok: false, error: "transactions.noSource" };
@@ -292,22 +418,20 @@ async function checkSourceBalance(
   if (sourceError || !source) return { ok: false, error: "transactions.noSource" };
   if (source.type !== "income") return { ok: false, error: "transactions.noSource" };
 
+  if (!vaultId) return { ok: false, error: "transactions.expenseVaultRequired" };
+
   const { data: rows, error: txError } = await supabase
     .from("transactions")
-    .select("type, amount, category_id, funding_source_id")
+    .select("type, amount, category_id, funding_source_id, vault_id, transfer_direction")
     .eq("user_id", userId);
   if (txError) return { ok: false, error: "err.generic" };
 
-  const balance = ((rows ?? []) as Pick<Transaction, "type" | "amount" | "category_id" | "funding_source_id">[]).reduce(
-    (sum, tx) => {
-      if (tx.type === "income" && tx.category_id === source.id) return sum + tx.amount;
-      if (tx.type === "expense" && tx.funding_source_id === source.id) return sum - tx.amount;
-      return sum;
-    },
-    0
+  const balances = computeSourceVaultBalances(
+    (rows ?? []) as PairTransaction[]
   );
-
-  if (balance < amount) return { ok: false, error: "transactions.insufficientSource" };
+  if (sourceVaultBalance(balances, source.id, vaultId) < amount) {
+    return { ok: false, error: "transactions.sourceNotInVault" };
+  }
   return { ok: true };
 }
 
@@ -400,10 +524,9 @@ export async function editTransaction(
   });
   if (error) {
     console.error("Supabase transaction edit failed.", { code: error.code, message: error.message });
-    if (error.message === "transactions.insufficientSource") {
-      return { ok: false, error: "transactions.insufficientSource" };
+    if (error.message.startsWith("err.") || error.message.startsWith("transactions.")) {
+      return { ok: false, error: error.message };
     }
-    if (error.message.startsWith("err.")) return { ok: false, error: error.message };
     return { ok: false, error: "err.generic" };
   }
 

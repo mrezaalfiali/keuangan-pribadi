@@ -9,10 +9,10 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
 2. Buka **SQL Editor**:
     - Proyek baru: jalankan seluruh isi
       [`supabase/migrations/0001_init.sql`](./supabase/migrations/0001_init.sql),
-      lalu migrasi `0002` sampai `0010` secara berurutan.
+      lalu migrasi `0002` sampai `0015` secara berurutan.
    - Proyek yang sudah memiliki sebagian tabel: jalankan
      [`supabase/migrations/0002_complete_supabase_schema.sql`](./supabase/migrations/0002_complete_supabase_schema.sql).
-     Lanjutkan dengan migrasi `0003` sampai `0010` secara berurutan. Migrasi
+     Lanjutkan dengan migrasi `0003` sampai `0015` secara berurutan. Migrasi
      `0002` aman dijalankan berulang kali dan melengkapi tabel yang belum ada.
      Jangan jalankan ulang `0001` pada proyek yang sudah memiliki tabel karena
      beberapa kebijakan di dalamnya tidak dibuat secara idempoten.
@@ -33,7 +33,14 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
        dan
        [`0009_recurring_transaction_reminders.sql`](./supabase/migrations/0009_recurring_transaction_reminders.sql),
        lalu
-       [`0010_transaction_edit_and_backup_restore.sql`](./supabase/migrations/0010_transaction_edit_and_backup_restore.sql).
+       [`0010_transaction_edit_and_backup_restore.sql`](./supabase/migrations/0010_transaction_edit_and_backup_restore.sql),
+       [`0011_expense_vault_enforcement.sql`](./supabase/migrations/0011_expense_vault_enforcement.sql),
+       [`0012_source_vault_pools.sql`](./supabase/migrations/0012_source_vault_pools.sql),
+       [`0013_recurring_recording_fix.sql`](./supabase/migrations/0013_recurring_recording_fix.sql),
+       [`0014_reset_financial_data.sql`](./supabase/migrations/0014_reset_financial_data.sql),
+       [`0015_legacy_enum_to_text.sql`](./supabase/migrations/0015_legacy_enum_to_text.sql),
+       lalu
+       [`0016_profiles_on_signup.sql`](./supabase/migrations/0016_profiles_on_signup.sql).
 
       Alasannya: `0001` memakai `create table if not exists`, jadi pada tabel yang
       sudah ada setiap perintah itu dilewati tanpa mengubah apa pun. Skrip lalu
@@ -139,6 +146,84 @@ Kolom yang memang wajib diisi aplikasi dikembalikan menjadi `NOT NULL`
 
        Jalankan `0010` setelah `0009`, lalu tunggu cache skema Supabase dimuat
        ulang sebelum menggunakan fitur edit dan pemulihan.
+
+       ### Pengeluaran wajib keluar dari vault
+
+       `0011` menutup celah pengeluaran yang bisa dicatat tanpa vault. Sebelumnya
+       pengeluaran hanya diperiksa terhadap saldo *sumber* pemasukan, bukan
+       terhadap vault tempat uang itu benar-benar disimpan. Baris dengan
+       `vault_id = null` dilewati oleh buku besar vault, jadi vault yang dikunci
+       tetap menyimpan saldonya sementara sumbernya berkurang — uang yang sama
+       terhitung dua kali dan penguncian tidak berguna.
+
+       Aturannya kini: pengeluaran wajib menunjuk vault milik pengguna yang tidak
+       dikunci dan saldonya cukup. Pemasukan tetap punya aturan sendiri (boleh
+       dipecah alokasi, dan boleh mendarat di vault yang dikunci).
+
+       ### Saldo per (sumber, vault)
+
+       `0012` mempersempit pemeriksaan sumber menjadi *per pool*. Pemeriksaan
+       sebelumnya menjumlah sumber pemasukan di semua vault lalu membandingkannya
+       dengan pengeluaran, sehingga dua vault bisa menyimpan sumber yang sama dan
+       uang di "Tabungan" bisa membayar pengeluaran dari "Darat" selama total
+       sumbernya cukup. Sekarang pengeluaran harus ditutup oleh pool
+       (sumber, vault) yang disebutnya lewat fungsi
+       `transaction_source_vault_balance`. Pemeriksaan saldo vault tetap dipakai
+       sebagai pengaman.
+
+       Migrasi ini juga mengisi sumber untuk baris lama yang belum punya: transfer
+       mendapat sumber sistem "Lainnya", dan pemasukan tanpa kategori mendapat
+       sumber yang sama. Keduanya tanpa efek bila datanya sudah lengkap. Jalankan
+       `0012` setelah `0011`.
+
+       ### Perbaikan pencatatan transaksi berulang
+
+       `0013` memperbaiki dua hal yang berakar pada skema lama. Pertama,
+       `public.transactions.id` bertipe `uuid` pada database legacy, sementara
+       seluruh repo mengasumsikan `bigint`; ketidakcocokan itu membuat "Tinjau &
+       catat" gagal `22P02` dan mengganggu edit transaksi. Tidak ada foreign key
+       yang menunjuk kolom itu, jadi menyelaraskannya ke `bigint` aman. Kedua,
+       `record_recurring_transaction` kini menyimpan `funding_source_id` pada
+       pengeluaran dan menerima mode alokasi eksplisit (`auto` mengikuti aturan
+       aktif, `single` memilih satu vault).
+
+       ### Reset data keuangan
+
+       `0014` menambahkan fungsi `reset_financial_data` untuk menghapus seluruh
+       data keuangan milik pengguna yang sedang masuk: transaksi, vault, kategori
+       pribadi, anggaran, aturan dan slot alokasi, jadwal berulang, serta reward.
+       Profil dan kategori bawaan sistem tetap dipertahankan. Aksi ini tersedia di
+       **Pengaturan → Zona berbahaya** dan hanya berjalan setelah pengguna mengetik
+       `RESET`. Fungsi berjalan sebagai `security definer` agar dapat membersihkan
+       reward, tetapi tetap dibatasi pada `auth.uid()` pengguna.
+
+       ### Kolom enum legacy menjadi teks
+
+       `0015` mengubah kolom yang pada database legacy dideklarasikan sebagai
+       enum PostgreSQL (yang utama: `transactions.type` dengan tipe
+       `transaction_type`) menjadi `text` biasa berikut `CHECK` constraint, sama
+       seperti skema aplikasi. Postgres meng-cast literal menjadi enum secara
+       implisit, sehingga insert lewat PostgREST tetap berjalan, tetapi **tidak**
+       meng-cast variabel `text` di dalam PL/pgSQL. Akibatnya setiap fungsi yang
+       memasukkan kolom itu sebagai variabel gagal:
+
+       ```
+       42804: column "type" is of type transaction_type but expression is of type text
+       ```
+
+       Inilah penyebab "Pulihkan cadangan" gagal di database legacy. Jalankan
+       `0015` setelah `0014` lalu tunggu cache skema PostgREST dimuat ulang.
+
+       ### Profil dibuat saat akun mendaftar
+
+       `0016` menambahkan trigger `on_auth_user_created` pada `auth.users` yang
+       membuat baris `profiles` setiap akun baru, plus mengisi profil untuk akun
+       lama yang belum punya. Sebelumnya pembuatan profil hanya dilakukan aplikasi
+       dan bergantung pada `data.session`; bila email perlu dikonfirmasi sesi
+       kosong, sehingga baris profil tak terbentuk dan penyimpanan nama tampilan
+       (`PGRST116: 0 rows`) gagal. Jalankan `0016` setelah `0015`; operasi sisi
+       aplikasi kini memakai `upsert` agar akun tanpa baris profil tetap aman.
+
 3. Dari **Project Settings → API**, salin Project URL serta anon/public key.
    Buat `.env.local` di root proyek:
 
@@ -232,6 +317,14 @@ kode PostgREST-nya.
 | `42501` pada `transfer_direction` atau `group_id` | Role `authenticated` belum mendapat izin kolom | Jalankan ulang migrasi yang menambahkan kolom tersebut |
 | `PGRST202` pada `record_recurring_transaction` atau `PGRST205` pada `recurring_transactions` | Migrasi pengingat transaksi berulang belum dijalankan atau cache skema belum dimuat ulang | Jalankan `0009` setelah `0008` dan tunggu cache PostgREST dimuat ulang |
 | `PGRST202` pada `edit_financial_transaction` atau `restore_financial_backup`, atau `PGRST204` pada `backup_key` | Migrasi edit/cadangan belum dijalankan atau cache skema belum dimuat ulang | Jalankan `0010` setelah `0009` dan tunggu cache PostgREST dimuat ulang |
+| `42804` pada `transactions.type` (`column ... is of type transaction_type but expression is of type text`) | Kolom `type` masih bertipe enum legacy, sehingga fungsi PL/pgSQL gagal menyisipkannya | Jalankan `0015` lalu tunggu cache skema PostgREST dimuat ulang |
+| `22P02` saat "Tinjau & catat" transaksi berulang | `public.transactions.id` masih bertipe `uuid`, bukan `bigint` | Jalankan `0013` |
+| `PGRST202` pada `transaction_source_vault_balance` | Pemeriksaan pool sumber-vault belum ada | Jalankan `0012` setelah `0011` |
+| `PGRST202` pada `record_recurring_transaction` (signature lama) | RPC berubah jumlah argumennya | Jalankan `0013` dan deploy versi aplikasi terbaru |
+| `PGRST202` pada `reset_financial_data` | Fungsi reset belum ada | Jalankan `0014` |
+| `transactions.expenseVaultRequired`, `transactions.lockedError`, `transactions.insufficient`, atau `transactions.sourceNotInVault` | Aturan pengeluaran (0011/0012) menolak transaksi: vault tidak ada/terkunci atau pool (sumber, vault) tidak cukup | Pilih vault dan sumber dana yang saldonya mencukupi; bukan masalah migrasi |
+| `transactions.allocationRuleRequired` | Pemasukan mode alokasi otomatis dicatat tanpa aturan alokasi aktif (atau slotnya tidak bisa dipakai), sehingga tidak ada vault tujuan | Aktifkan aturan di menu **Alokasi**, atau catat dengan mode satu vault tujuan; bukan masalah migrasi |
+| `PGRST116` saat menyimpan nama tampilan di **Pengaturan → Profil** | Akun dibuat sebelum trigger `0016` sehingga belum punya baris `profiles` | Jalankan `0016`; penyimpanan kini memakai `upsert` sehingga akun tanpa profil tetap aman |
 | `42501` | Role tidak punya izin pada tabel | Periksa `grant` di migrasi |
 | `PGRST301`, `JWTExpired` | Sesi login tidak valid | Login ulang |
 | `Failed to fetch` | Tidak bisa menghubungi Supabase | Periksa jaringan, proxy, atau VPN |

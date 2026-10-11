@@ -23,11 +23,16 @@ export function formatNumber(amount: number): string {
   return Math.round(amount).toLocaleString("id-ID");
 }
 
-/** Parse a user-typed string ("9.000.000" / "9,000,000" / "9000000") into an int. */
+/**
+ * Parses a user-typed integer Rupiah amount. Rupiah has no cents, so every
+ * grouping separator is stripped: `"9.000.000"` and `"9,000,000"` both parse to
+ * `9000000`. Invalid/empty input yields `0`.
+ */
 export function parseAmount(input: string): number {
-  const cleaned = input.replace(/[^\d.-]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? Math.trunc(n) : 0;
+  const normalized = input.replace(/[^\d-]/g, "");
+  const value = Number(normalized);
+  if (!Number.isFinite(value)) return 0;
+  return Math.trunc(value);
 }
 
 /** Split an amount by percentage; remainder is assigned to the first slot so the total always reconciles. */

@@ -2,10 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
-import { sourceSlug } from "@/src/lib/sources";
+import { sourceSlug, computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 import { isDuplicateName } from "@/src/lib/labels";
-import type { Transaction } from "../types";
-import { vaultBalanceDelta } from "../vault-ledger";
 
 export interface ActionResult {
   ok: boolean;
@@ -71,7 +69,7 @@ export async function toggleVaultLock(
   const supabase = await createClient();
   const { error } = await supabase
     .from("vaults")
-    .update({ is_locked: lock, locked_until: lock ? null : null })
+    .update({ is_locked: lock })
     .eq("id", vaultId);
   if (error) return { ok: false, error: "err.generic" };
 
@@ -100,6 +98,7 @@ export async function vaultTransfer(
   fromVaultId: string,
   toVaultId: string,
   amount: number,
+  sourceId: string,
   note?: string | null
 ): Promise<ActionResult> {
   const supabase = await createClient();
@@ -113,18 +112,30 @@ export async function vaultTransfer(
   if (!fromVaultId || !toVaultId || fromVaultId === toVaultId) {
     return { ok: false, error: "err.generic" };
   }
+  if (!sourceId) return { ok: false, error: "transactions.noSource" };
+
+  const { data: source, error: sourceError } = await supabase
+    .from("categories")
+    .select("id, type")
+    .eq("id", sourceId)
+    .or(`user_id.is.null,user_id.eq.${user.id}`)
+    .maybeSingle();
+  if (sourceError || !source || source.type !== "income") {
+    return { ok: false, error: "transactions.noSource" };
+  }
 
   const { data: all, error: transactionsError } = await supabase
     .from("transactions")
-    .select("type, amount, vault_id, transfer_direction")
+    .select("type, amount, category_id, funding_source_id, vault_id, transfer_direction")
     .eq("user_id", user.id);
   if (transactionsError) return { ok: false, error: "err.generic" };
 
-  const balance = ((all ?? []) as Pick<Transaction, "type" | "amount" | "vault_id" | "transfer_direction">[]).reduce((sum, tx) => {
-    if (tx.vault_id !== fromVaultId) return sum;
-    return sum + vaultBalanceDelta(tx.type, tx.amount, tx.transfer_direction);
-  }, 0);
-  if (balance < amountInt) return { ok: false, error: "vaults.insufficient" };
+  // Transfer hanya boleh menarik dari kolam sumber yang benar-benar mengisi
+  // vault asal, bukan dari saldo vault agregat.
+  const balances = computeSourceVaultBalances((all ?? []) as PairTransaction[]);
+  if (sourceVaultBalance(balances, sourceId, fromVaultId) < amountInt) {
+    return { ok: false, error: "transactions.sourceNotInVault" };
+  }
 
   const { data: vaults, error: vaultError } = await supabase
     .from("vaults")
@@ -141,8 +152,8 @@ export async function vaultTransfer(
   const date = new Date().toISOString().slice(0, 10);
   const groupId = crypto.randomUUID();
   const { error } = await supabase.from("transactions").insert([
-    { user_id: user.id, type: "transfer", transfer_direction: "out", group_id: groupId, amount: amountInt, date, vault_id: fromVaultId, note },
-    { user_id: user.id, type: "transfer", transfer_direction: "in", group_id: groupId, amount: amountInt, date, vault_id: toVaultId, note },
+    { user_id: user.id, type: "transfer", transfer_direction: "out", group_id: groupId, amount: amountInt, date, vault_id: fromVaultId, funding_source_id: sourceId, note },
+    { user_id: user.id, type: "transfer", transfer_direction: "in", group_id: groupId, amount: amountInt, date, vault_id: toVaultId, funding_source_id: sourceId, note },
   ]);
   if (error) return { ok: false, error: "err.generic" };
 

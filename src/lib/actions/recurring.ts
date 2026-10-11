@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import { todayJakartaISO } from "@/src/lib/recurring";
+import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 
 type ActionResult = {
   ok: boolean;
@@ -89,6 +90,12 @@ export async function saveRecurringTemplate(locale: string, input: RecurringInpu
   if ((input.type === "expense") !== Boolean(input.fundingSourceId)) {
     return { ok: false, error: "err.source" };
   }
+  if (input.type === "income" && !input.categoryId) {
+    return { ok: false, error: "err.category" };
+  }
+  if (input.type === "expense" && !input.vaultId) {
+    return { ok: false, error: "transactions.expenseVaultRequired" };
+  }
 
   const categoryIds = [input.categoryId, input.fundingSourceId].filter((id): id is string => Boolean(id));
   if (categoryIds.length) {
@@ -152,6 +159,7 @@ export async function recordRecurringTransaction(
     fundingSourceId: string | null;
     vaultId: string | null;
     note: string;
+    allocationMode: "auto" | "single";
   }
 ): Promise<ActionResult> {
   const supabase = await createClient();
@@ -180,21 +188,43 @@ export async function recordRecurringTransaction(
     return { ok: false, error: "err.occurrence" };
   }
 
+  if (input.allocationMode !== "auto" && input.allocationMode !== "single") {
+    return { ok: false, error: "err.generic" };
+  }
+
   if (template.type === "expense") {
     if (!input.fundingSourceId) return { ok: false, error: "transactions.noSource" };
+    if (!input.vaultId) return { ok: false, error: "transactions.expenseVaultRequired" };
     const { data: rows, error } = await supabase
       .from("transactions")
-      .select("type, amount, category_id, funding_source_id")
+      .select("type, amount, category_id, funding_source_id, vault_id, transfer_direction")
       .eq("user_id", user.id);
     if (error) return { ok: false, error: "err.generic" };
-    const balance = (rows ?? []).reduce((sum, tx) => {
-      if (tx.type === "income" && tx.category_id === input.fundingSourceId) return sum + tx.amount;
-      if (tx.type === "expense" && tx.funding_source_id === input.fundingSourceId) return sum - tx.amount;
-      return sum;
-    }, 0);
-    if (balance < amount) return { ok: false, error: "transactions.insufficientSource" };
-  } else if (input.fundingSourceId) {
-    return { ok: false, error: "err.source" };
+    // Cek pasangan (sumber, vault), bukan agregat sumber: pengeluaran berulang
+    // hanya boleh memakai uang sumber yang benar-benar ada di vault itu.
+    const balances = computeSourceVaultBalances((rows ?? []) as PairTransaction[]);
+    if (sourceVaultBalance(balances, input.fundingSourceId, input.vaultId) < amount) {
+      return { ok: false, error: "transactions.sourceNotInVault" };
+    }
+  } else {
+    if (input.fundingSourceId) return { ok: false, error: "err.source" };
+    // Mode "single" mencatat pemasukan ke satu vault pilihan, jadi vault wajib.
+    if (input.allocationMode === "single" && !input.vaultId) {
+      return { ok: false, error: "err.vault" };
+    }
+    // Mode "auto" butuh aturan alokasi aktif; tanpa itu pemasukan tersimpan
+    // dengan vault_id null dan uangnya tidak bisa dibelanjakan lagi.
+    if (input.allocationMode === "auto" && !input.vaultId) {
+      const { data: rule, error: ruleError } = await supabase
+        .from("allocation_rules")
+        .select("id")
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .limit(1)
+        .maybeSingle();
+      if (ruleError) return { ok: false, error: "err.generic" };
+      if (!rule) return { ok: false, error: "transactions.allocationRuleRequired" };
+    }
   }
 
   const { data, error } = await supabase.rpc("record_recurring_transaction", {
@@ -207,13 +237,14 @@ export async function recordRecurringTransaction(
     p_funding_source_id: input.fundingSourceId,
     p_vault_id: input.vaultId,
     p_note: input.note,
+    p_allocation_mode: input.allocationMode,
   });
   if (error) {
     console.error("Supabase recurring transaction record failed.", { code: error.code, message: error.message });
-    if (error.message === "transactions.insufficientSource") {
-      return { ok: false, error: "transactions.insufficientSource" };
+    if (error.message.startsWith("err.") || error.message.startsWith("transactions.")) {
+      return { ok: false, error: error.message };
     }
-    return { ok: false, error: error.message.startsWith("err.") ? error.message : "err.generic" };
+    return { ok: false, error: "err.generic" };
   }
   if (!Array.isArray(data) || typeof data[0]?.transaction_id !== "number") {
     console.error("Supabase recurring transaction RPC returned an invalid response.");

@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   availableSources,
   computeSourceBalances,
+  computeSourceVaultBalances,
   sourceSlug,
+  sourceVaultBalance,
   summarizeSources,
+  type PairTransaction,
   type SourceCategory,
   type SourceTransaction,
 } from "@/src/lib/sources";
@@ -142,6 +145,83 @@ describe("availableSources", () => {
 
   it("kosong saat tidak ada pemasukan sama sekali", () => {
     expect(availableSources(summarizeSources([], SOURCES))).toEqual([]);
+  });
+});
+
+const VAULT_A = "vault-tabungan";
+const VAULT_B = "vault-darat";
+
+function pairTx(over: Partial<PairTransaction> = {}): PairTransaction {
+  return { type: "income", amount: 0, category_id: null, funding_source_id: null, vault_id: null, ...over };
+}
+
+describe("computeSourceVaultBalances", () => {
+  it("menambah pemasukan ke pool sumber×vault-nya", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "income", amount: 3_000_000, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "income", amount: 1_000_000, category_id: gaji.id, vault_id: VAULT_B }),
+    ]);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_A)).toBe(3_000_000);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_B)).toBe(1_000_000);
+  });
+
+  it("mengurangi pool sesuai vault pengeluaran, bukan vault lain", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "income", amount: 2_000_000, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "income", amount: 2_000_000, category_id: gaji.id, vault_id: VAULT_B }),
+      pairTx({ type: "expense", amount: 500_000, funding_source_id: gaji.id, vault_id: VAULT_A }),
+    ]);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_A)).toBe(1_500_000);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_B)).toBe(2_000_000);
+  });
+
+  it("memisahkan sumber berbeda di vault yang sama", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "income", amount: 1_000_000, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "income", amount: 500_000, category_id: magang.id, vault_id: VAULT_A }),
+      pairTx({ type: "expense", amount: 700_000, funding_source_id: gaji.id, vault_id: VAULT_A }),
+    ]);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_A)).toBe(300_000);
+    expect(sourceVaultBalance(balances, magang.id, VAULT_A)).toBe(500_000);
+  });
+
+  it("transfer keluar mengurangi pool asal, transfer masuk menambah pool tujuan", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "income", amount: 1_000_000, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "transfer", amount: 400_000, funding_source_id: gaji.id, vault_id: VAULT_A, transfer_direction: "out" }),
+      pairTx({ type: "transfer", amount: 400_000, funding_source_id: gaji.id, vault_id: VAULT_B, transfer_direction: "in" }),
+    ]);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_A)).toBe(600_000);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_B)).toBe(400_000);
+  });
+
+  it("transfer tanpa arah menambah seperti ledger vault", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "transfer", amount: 200_000, funding_source_id: gaji.id, vault_id: VAULT_A }),
+    ]);
+    expect(sourceVaultBalance(balances, gaji.id, VAULT_A)).toBe(200_000);
+  });
+
+  it("melewati baris tanpa vault, tanpa sumber, atau jumlah tak wajar", () => {
+    const balances = computeSourceVaultBalances([
+      pairTx({ type: "income", amount: 500_000, category_id: gaji.id }),
+      pairTx({ type: "expense", amount: 500_000, vault_id: VAULT_A }),
+      pairTx({ type: "income", amount: NaN, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "transfer", amount: 500_000, vault_id: VAULT_A }),
+    ]);
+    expect([...balances.values()]).toEqual([]);
+  });
+
+  it("menjumlahkan seluruh pool sebuah vault sama dengan saldo vaultnya", () => {
+    const rows: PairTransaction[] = [
+      pairTx({ type: "income", amount: 3_000_000, category_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "income", amount: 1_000_000, category_id: magang.id, vault_id: VAULT_A }),
+      pairTx({ type: "expense", amount: 500_000, funding_source_id: gaji.id, vault_id: VAULT_A }),
+      pairTx({ type: "transfer", amount: 400_000, funding_source_id: magang.id, vault_id: VAULT_A, transfer_direction: "out" }),
+    ];
+    const balances = computeSourceVaultBalances(rows);
+    const total = [gaji.id, magang.id].reduce((sum, id) => sum + sourceVaultBalance(balances, id, VAULT_A), 0);
+    expect(total).toBe(3_100_000);
   });
 });
 

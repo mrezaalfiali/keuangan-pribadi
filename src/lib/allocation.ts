@@ -5,6 +5,31 @@ export interface DistResult {
   amount: number;
 }
 
+/** Cara pemasukan dialokasikan saat dicatat dari form Transaksi. */
+export type AllocationMode = "auto" | "single";
+
+/**
+ * Memutuskan apakah satu pemasukan baru harus dilewatkan aturan alokasi.
+ *
+ * `auto` (default) membagi nominal ke beberapa vault mengikuti aturan aktif,
+ * sementara `single` mengirim seluruh nominal ke satu vault pilihan. Mode
+ * `single` wajib menyertakan vault: tanpa tujuan, uangnya menggantung tanpa
+ * rekening dan lebih baik ditolak di sini daripada disimpan setengah jalan.
+ *
+ * Dipakai bersama oleh aksi server dan form supaya aturan yang tampil di layar
+ * sama persis dengan yang dijalankan.
+ */
+export function resolveIncomeAllocation(
+  mode: AllocationMode | null | undefined,
+  vaultId: string | null
+): { ok: true; applyAllocation: boolean } | { ok: false; error: "vaultRequired" } {
+  if (mode === "single") {
+    if (!vaultId) return { ok: false, error: "vaultRequired" };
+    return { ok: true, applyAllocation: false };
+  }
+  return { ok: true, applyAllocation: true };
+}
+
 /**
  * Distribute an income amount across allocation slots:
  *  - percent / amount slots consume from the total first
