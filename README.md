@@ -9,10 +9,10 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
 2. Buka **SQL Editor**:
     - Proyek baru: jalankan seluruh isi
       [`supabase/migrations/0001_init.sql`](./supabase/migrations/0001_init.sql),
-      lalu migrasi `0002` sampai `0015` secara berurutan.
+      lalu migrasi `0002` sampai `0017` secara berurutan.
    - Proyek yang sudah memiliki sebagian tabel: jalankan
      [`supabase/migrations/0002_complete_supabase_schema.sql`](./supabase/migrations/0002_complete_supabase_schema.sql).
-     Lanjutkan dengan migrasi `0003` sampai `0015` secara berurutan. Migrasi
+     Lanjutkan dengan migrasi `0003` sampai `0017` secara berurutan. Migrasi
      `0002` aman dijalankan berulang kali dan melengkapi tabel yang belum ada.
      Jangan jalankan ulang `0001` pada proyek yang sudah memiliki tabel karena
      beberapa kebijakan di dalamnya tidak dibuat secara idempoten.
@@ -40,7 +40,14 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
        [`0014_reset_financial_data.sql`](./supabase/migrations/0014_reset_financial_data.sql),
        [`0015_legacy_enum_to_text.sql`](./supabase/migrations/0015_legacy_enum_to_text.sql),
        lalu
-       [`0016_profiles_on_signup.sql`](./supabase/migrations/0016_profiles_on_signup.sql).
+       [`0016_profiles_on_signup.sql`](./supabase/migrations/0016_profiles_on_signup.sql),
+       dan
+       [`0017_preserve_user_categories_on_reset.sql`](./supabase/migrations/0017_preserve_user_categories_on_reset.sql).
+
+      Jalankan migrasi `0017` untuk memperbarui fitur reset agar tetap menghapus
+      transaksi dan data keuangan lainnya, tetapi mempertahankan kategori buatan
+      pengguna. Migrasi ini menggantikan fungsi reset dari `0014`; data kategori
+      yang terhapus oleh reset sebelumnya harus dipulihkan dari file backup.
 
       Alasannya: `0001` memakai `create table if not exists`, jadi pada tabel yang
       sudah ada setiap perintah itu dilewati tanpa mengubah apa pun. Skrip lalu
