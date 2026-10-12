@@ -9,6 +9,7 @@ import { Button } from "@/src/components/ui/button";
 import { Field, Input } from "@/src/components/ui/input";
 import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
+import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/actions/transactions";
 import { createIncomeSource, deleteIncomeSource } from "@/src/lib/actions/categories";
 import {
@@ -347,7 +348,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       if (authError) throw authError;
       if (!user) throw new Error("Session Supabase tidak ditemukan.");
-      const [txResult, vaultResult, categoryResult, budgetResult, recurringResult] = await Promise.all([
+      const categories = await ensureDefaultCategories(supabase, user.id);
+      const [txResult, vaultResult, budgetResult, recurringResult] = await Promise.all([
         supabase.from("transactions")
           .select("*, vault:vaults(id,slug,name,is_locked), category:categories!transactions_category_id_fkey(id,slug,name_key), funding:categories!transactions_funding_source_id_fkey(id,slug,name_key)")
           .eq("user_id", user.id)
@@ -357,10 +359,6 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           .select("*")
           .eq("user_id", user.id)
           .order("priority", { ascending: true }),
-        supabase.from("categories")
-          .select("*")
-          .or(`user_id.is.null,user_id.eq.${user.id}`)
-          .order("is_system", { ascending: false }),
         supabase.from("budgets")
           .select("*")
           .eq("user_id", user.id),
@@ -371,12 +369,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       ]);
       if (txResult.error) throw txResult.error;
       if (vaultResult.error) throw vaultResult.error;
-      if (categoryResult.error) throw categoryResult.error;
       if (budgetResult.error) throw budgetResult.error;
       if (recurringResult.error) throw recurringResult.error;
       setTransactions((txResult.data ?? []) as TxRow[]);
       setVaults((vaultResult.data ?? []) as Vault[]);
-      setCategories((categoryResult.data ?? []) as Category[]);
+      setCategories(categories);
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
     } catch (loadError) {

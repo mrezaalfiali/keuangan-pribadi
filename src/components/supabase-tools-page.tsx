@@ -18,6 +18,7 @@ import { restoreFinancialBackup } from "@/src/lib/actions/backup";
 import { resetFinancialData } from "@/src/lib/actions/reset";
 import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
+import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { previewAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
 import {
   budgetLeftover,
@@ -119,24 +120,24 @@ export function SupabaseToolsPage({ section }: Props) {
       if (!user) throw new Error("Session Supabase tidak ditemukan.");
       setUserId(user.id);
       setEmail(user.email ?? "");
-      const [vaultResult, txResult, budgetResult, categoryResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult] = await Promise.all([
+      const categories = await ensureDefaultCategories(supabase, user.id);
+      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult] = await Promise.all([
         supabase.from("vaults").select("*").eq("user_id", user.id).order("priority"),
         supabase.from("transactions").select("*").eq("user_id", user.id).order("date", { ascending: false }),
         supabase.from("budgets").select("*").eq("user_id", user.id).order("starts_on", { ascending: false }),
-        supabase.from("categories").select("*").or(`user_id.is.null,user_id.eq.${user.id}`).order("is_system", { ascending: false }),
         supabase.from("allocation_rules").select("*, slots:allocation_slots(*, vault:vaults(*))").eq("user_id", user.id).order("created_at", { ascending: false }),
         supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
         supabase.from("gamification_state").select("*").eq("user_id", user.id).maybeSingle(),
         supabase.from("achievements").select("*"),
         supabase.from("user_achievements").select("achievement_id,unlocked_at").eq("user_id", user.id),
       ]);
-      const results = [vaultResult, txResult, budgetResult, categoryResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
+      const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
       if (failed?.error) throw failed.error;
       setVaults((vaultResult.data ?? []) as Vault[]);
       setTransactions((txResult.data ?? []) as Transaction[]);
       setBudgets((budgetResult.data ?? []) as Budget[]);
-      setCategories((categoryResult.data ?? []) as Category[]);
+      setCategories(categories);
       setRules((ruleResult.data ?? []) as RuleWithSlots[]);
       setProfile(profileResult.data as Profile | null);
       setGamification(gameResult.data as GamificationState | null);
