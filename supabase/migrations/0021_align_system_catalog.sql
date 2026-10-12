@@ -124,14 +124,20 @@ with normalised as (
   from public.categories c
 ),
 canonical as (
-  select type, norm_slug, min(id) as canonical_id
+  -- one shared row per (type, norm_slug), picked deterministically by id;
+  -- PostgreSQL has no min(uuid) aggregate, so distinct on does the picking
+  select distinct on (type, norm_slug)
+    type,
+    norm_slug,
+    id as canonical_id
   from normalised
   where user_id is null
-  group by type, norm_slug
+  order by type, norm_slug, id
 ),
 duplicates as (
-  -- per-account copies (and suffixed leftovers) folding into the shared row
-  select distinct on (n.id)
+  -- per-account copies (and suffixed leftovers) folding into the shared row.
+  -- canonical holds exactly one row per (type, norm_slug), so this join is 1:1
+  select
     n.id as duplicate_id,
     k.canonical_id
   from normalised n
