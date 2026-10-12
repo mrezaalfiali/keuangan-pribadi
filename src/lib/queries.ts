@@ -11,7 +11,6 @@ import type {
   VaultBalance,
 } from "./types";
 import { vaultBalanceDelta } from "./vault-ledger";
-import { dedupeCategories } from "@/src/lib/system-categories";
 
 export type TxWithRelations = Transaction & {
   category: Category | null;
@@ -46,21 +45,6 @@ export async function getProfile(): Promise<Profile | null> {
     return inserted as Profile;
   }
   return data as Profile;
-}
-
-export async function getCategories(): Promise<Category[]> {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return [];
-  const { data, error } = await supabase
-    .from("categories")
-    .select("*")
-    .or(`user_id.is.null,user_id.eq.${user.id}`)
-    .order("is_system", { ascending: false });
-  if (error) throw error;
-  return dedupeCategories((data as Category[]) ?? []);
 }
 
 export async function getVaults(): Promise<Vault[]> {
