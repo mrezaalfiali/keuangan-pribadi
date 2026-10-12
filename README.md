@@ -9,10 +9,10 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
 2. Buka **SQL Editor**:
     - Proyek baru: jalankan seluruh isi
       [`supabase/migrations/0001_init.sql`](./supabase/migrations/0001_init.sql),
-      lalu migrasi `0002` sampai `0019` secara berurutan.
+      lalu migrasi `0002` sampai `0021` secara berurutan.
    - Proyek yang sudah memiliki sebagian tabel: jalankan
      [`supabase/migrations/0002_complete_supabase_schema.sql`](./supabase/migrations/0002_complete_supabase_schema.sql).
-     Lanjutkan dengan migrasi `0003` sampai `0019` secara berurutan. Migrasi
+     Lanjutkan dengan migrasi `0003` sampai `0021` secara berurutan. Migrasi
      `0002` aman dijalankan berulang kali dan melengkapi tabel yang belum ada.
      Jangan jalankan ulang `0001` pada proyek yang sudah memiliki tabel karena
      beberapa kebijakan di dalamnya tidak dibuat secara idempoten.
@@ -46,7 +46,11 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
        lalu
        [`0018_restore_system_categories.sql`](./supabase/migrations/0018_restore_system_categories.sql),
        lalu
-       [`0019_add_expense_categories.sql`](./supabase/migrations/0019_add_expense_categories.sql).
+       [`0019_add_expense_categories.sql`](./supabase/migrations/0019_add_expense_categories.sql),
+       lalu
+       [`0020_merge_duplicate_categories.sql`](./supabase/migrations/0020_merge_duplicate_categories.sql),
+       lalu
+       [`0021_align_system_catalog.sql`](./supabase/migrations/0021_align_system_catalog.sql).
 
       Jalankan migrasi `0017` untuk memperbarui fitur reset agar tetap menghapus
       transaksi dan data keuangan lainnya, tetapi mempertahankan kategori buatan
@@ -58,19 +62,52 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
       menghapus kategori buatan pengguna. Kategori buatan pengguna yang sudah
       terhapus sebelum `0017` tetap hanya dapat dikembalikan dari backup.
 
-      Saat halaman keuangan dibuka, aplikasi juga memastikan 27 kategori bawaan
-      tersimpan untuk akun yang sedang masuk. Jadi kategori yang hilang tetap
-      dipulihkan pada akun tersebut tanpa membuat kategori duplikat, dan transaksi
-      tetap menyimpan referensi kategori database yang valid.
+      Katalog bersama — 27 baris dengan `user_id IS NULL` — adalah sumber
+      tunggal kategori bawaan. Saat halaman keuangan dibuka, aplikasi
+      membandingkan isi katalog dengan daftar bawaannya: selama baris bersama
+      lengkap, tidak ada satu pun kategori yang ditulis ke akun yang sedang
+      masuk. Bila sebuah baris bawaan tidak terlihat sama sekali — tidak ada di
+      katalog bersama maupun di milik akun — aplikasi menyalinnya ke akun itu
+      sebagai cadangan, tanpa membuat duplikat. Transaksi selalu menyimpan
+      referensi kategori database yang valid, dan `dedupeCategories` menyatukan
+      baris mana pun yang slug ternormalisasinya sama sehingga label tidak
+      pernah tampil ganda.
 
       Migrasi `0019` dan katalog aplikasi menambahkan kategori pengeluaran umum
       seperti Self Reward, Keluarga, Anak, Rumah Tangga, Perawatan Diri,
       Komunikasi & Internet, Kendaraan, Hewan Peliharaan, Hadiah, Donasi,
-      Langganan, Olahraga, Liburan, dan Pajak. Kategori ini otomatis dilengkapi
-      untuk akun yang membuka halaman keuangan; migrasi `0019` menambahkannya
-      sebagai kategori bawaan bersama.
+      Langganan, Olahraga, Liburan, dan Pajak. Kategori ini termasuk dalam 27
+      baris katalog bersama; migrasi `0019` menambahkannya sebagai kategori
+      bawaan bersama, dan aplikasi melengkapinya bila ada yang hilang.
 
-      Alasannya: `0001` memakai `create table if not exists`, jadi pada tabel yang
+      Jalankan `0020` bila daftar kategori menampilkan dua baris dengan tulisan
+      yang sama (misalnya "Hiburan" dua kali). Baris bersufiks seperti
+      `hiburan-d22c0e0e` adalah sisa normalisasi slug di `0003`: slug diganti,
+      baris lama tetap ada, lalu `labels.ts` membuang sufiksnya kembali saat
+      menampilkan label. `0020` menggabungkan baris yang labelnya sama,
+      memindahkan seluruh referensi transaksi, sumber dana, jadwal berulang,
+      aturan alokasi, dan anggaran ke baris yang dipertahankan, lalu menghapus
+      baris yang tidak lagi direferensikan. Aman dijalankan berulang kali; file
+      ini diakhiri query verifikasi yang harus mengembalikan nol baris.
+
+      Jalankan `0021` setelah `0020`. Migrasi ini memulihkan katalog 27 baris,
+      menulis ulang keempat policy tabel `categories` sesuai definisi `0001`
+      — klausa `user_id is null` pada policy select-lah yang selama ini
+      menyembunyikan katalog bersama dari aplikasi dan menyebabkan setiap akun
+      menyimpan salinannya sendiri — lalu melipat salinan per-akun itu ke baris
+      bersama dan memasang index unik agar katalog tidak terpecah lagi.
+      Pemeriksaan akhirnya diharapkan berbunyi: 4 policy, 27 baris katalog,
+      dan nol baris pada tiga query sisanya.
+
+      Semua migrasi dijalankan manual melalui SQL Editor. Repo ini tidak
+      memakai Supabase CLI dan tidak memiliki ledger
+      `supabase_migrations.schema_migrations`, sehingga tidak ada yang tercatat
+      otomatis. Karena itu **jangan jalankan `supabase db push`** pada project
+      ini: perintah itu akan mengeksekusi ulang seluruh migrasi dari `0001`
+      terhadap data yang sudah berisi transaksi pengguna.
+
+      Sebabnya jalur di atas memakai `0002` lebih dulu: `0001` memakai
+      `create table if not exists`, jadi pada tabel yang
       sudah ada setiap perintah itu dilewati tanpa mengubah apa pun. Skrip lalu
       berhenti di `create index ... (user_id, date desc)` dengan
       `ERROR: 42703: column "date" does not exist`. `0001` kini mendeteksi kondisi
@@ -277,6 +314,20 @@ Kolom yang memang wajib diisi aplikasi dikembalikan menjadi `NOT NULL`
 Setelah deploy, tambahkan URL callback domain produksi ke Supabase Redirect
 URLs dan atur environment variables yang sama di platform hosting.
 
+## Perintah pengembangan
+
+| Perintah | Fungsi |
+| --- | --- |
+| `npm install` | Menginstal dependensi |
+| `npm run dev` | Server pengembangan di http://localhost:3000 |
+| `npm test` | Seluruh test vitest |
+| `npm run lint` | ESLint |
+| `npm run build` | Build produksi, termasuk type-check TypeScript |
+
+`next.config.ts` menonaktifkan `ignoreBuildErrors`, jadi `npm run build` akan
+gagal begitu ada kesalahan tipe. Jalankan `npm test`, `npm run lint`, dan
+`npm run build` sampai semuanya lolos sebelum push.
+
 ## Memahami vault, alokasi, dan anggaran
 
 Empat menu ini sering tertukar, padahal masing-masing menjawab pertanyaan berbeda.
@@ -312,7 +363,10 @@ tombol salin tersedia untuk memindahkan angkanya tanpa mengetik ulang.
 
 ## Data
 
-RLS membatasi akses data berdasarkan pengguna yang sedang masuk. Data yang
+RLS membatasi akses data berdasarkan pengguna yang sedang masuk. Pengecualiannya
+adalah kategori bawaan: baris dengan `user_id` NULL adalah katalog bersama yang
+dapat dibaca setiap akun melalui policy `categories select`, tetapi tidak dapat
+diedit atau dihapus dari aplikasi — hanya melalui migrasi. Data yang
 pernah tersimpan pada versi lokal browser tidak diunggah otomatis ke Supabase;
 ekspor atau salin data tersebut sebelum menghapus data browser.
 
@@ -353,6 +407,9 @@ kode PostgREST-nya.
 | `transactions.expenseVaultRequired`, `transactions.lockedError`, `transactions.insufficient`, atau `transactions.sourceNotInVault` | Aturan pengeluaran (0011/0012) menolak transaksi: vault tidak ada/terkunci atau pool (sumber, vault) tidak cukup | Pilih vault dan sumber dana yang saldonya mencukupi; bukan masalah migrasi |
 | `transactions.allocationRuleRequired` | Pemasukan mode alokasi otomatis dicatat tanpa aturan alokasi aktif (atau slotnya tidak bisa dipakai), sehingga tidak ada vault tujuan | Aktifkan aturan di menu **Alokasi**, atau catat dengan mode satu vault tujuan; bukan masalah migrasi |
 | `PGRST116` saat menyimpan nama tampilan di **Pengaturan → Profil** | Akun dibuat sebelum trigger `0016` sehingga belum punya baris `profiles` | Jalankan `0016`; penyimpanan kini memakai `upsert` sehingga akun tanpa profil tetap aman |
+| Kategori bawaan tampil dua kali (misalnya "Hiburan" ganda) | Baris bersufiks sisa normalisasi `0003`, atau salinan kategori milik akun yang berdampingan dengan baris katalog | Jalankan `0020`, lalu `0021` |
+| Label kategori kosong pada transaksi tersimpan | Policy select `categories` tidak memuat `user_id is null`, sehingga baris katalog bersama tak terbaca | Jalankan `0021` untuk menulis ulang policy |
+| Jumlah kategori terus bertambah setiap halaman dibuka | Policy select menyembunyikan katalog bersama, jadi `ensureDefaultCategories` menyalinnya ke akun | Jalankan `0021`; jumlah harus berhenti bertambah setelah reload |
 | `42501` | Role tidak punya izin pada tabel | Periksa `grant` di migrasi |
 | `PGRST301`, `JWTExpired` | Sesi login tidak valid | Login ulang |
 | `Failed to fetch` | Tidak bisa menghubungi Supabase | Periksa jaringan, proxy, atau VPN |
