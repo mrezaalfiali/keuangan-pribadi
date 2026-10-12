@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { humanizeSlug, isDuplicateName, resolveLabel } from "@/src/lib/labels";
+import { humanizeSlug, isDuplicateName, resolveLabel, sortByLabel } from "@/src/lib/labels";
 
 /** Fake `useTranslations("cat")`; mirrors the real `cat` namespace. */
 const CAT: Record<string, string> = {
@@ -78,6 +78,25 @@ describe("resolveLabel", () => {
 
   it("mengabaikan name_key kosong yang hanya berisi whitespace", () => {
     expect(resolveLabel({ slug: "hiburan-d22co", name_key: "   " }, translate)).toBe("Hiburan");
+  });
+});
+
+describe("sortByLabel", () => {
+  it("sorts categories by their translated labels without mutating the input", () => {
+    const categories = [
+      { slug: "makanan", name_key: "cat.makanan" },
+      { slug: "hiburan", name_key: "cat.hiburan" },
+      { slug: "gaji-kontraktor", name_key: "Gaji Kontraktor" },
+    ];
+
+    const sorted = sortByLabel(categories, translate, "id");
+
+    expect(sorted.map((category) => resolveLabel(category, translate))).toEqual([
+      "Gaji Kontraktor",
+      "Hiburan",
+      "Makanan",
+    ]);
+    expect(categories[0].slug).toBe("makanan");
   });
 });
 

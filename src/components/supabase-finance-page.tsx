@@ -18,7 +18,7 @@ import {
   summarizeSources,
   type SourceSummary,
 } from "@/src/lib/sources";
-import { resolveLabel, humanizeSlug } from "@/src/lib/labels";
+import { resolveLabel, humanizeSlug, sortByLabel } from "@/src/lib/labels";
 import { todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
 import { budgetSpend, budgetState, budgetStatus } from "@/src/lib/budget";
@@ -373,7 +373,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       if (recurringResult.error) throw recurringResult.error;
       setTransactions((txResult.data ?? []) as TxRow[]);
       setVaults((vaultResult.data ?? []) as Vault[]);
-      setCategories(categories);
+      setCategories(sortByLabel(categories, categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
     } catch (loadError) {
@@ -382,7 +382,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     } finally {
       setLoading(false);
     }
-  }, [settings]);
+  }, [categoryName, locale, settings]);
 
   useEffect(() => {
     let active = true;

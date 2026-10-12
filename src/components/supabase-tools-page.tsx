@@ -32,7 +32,7 @@ import {
   periodRange,
 } from "@/src/lib/budget";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
-import { resolveLabel } from "@/src/lib/labels";
+import { resolveLabel, sortByLabel } from "@/src/lib/labels";
 import { vaultBalanceDelta } from "@/src/lib/vault-ledger";
 import { getLevelInfo } from "@/src/lib/levels";
 import { nextStreakReward } from "@/src/lib/gamification";
@@ -137,7 +137,7 @@ export function SupabaseToolsPage({ section }: Props) {
       setVaults((vaultResult.data ?? []) as Vault[]);
       setTransactions((txResult.data ?? []) as Transaction[]);
       setBudgets((budgetResult.data ?? []) as Budget[]);
-      setCategories(categories);
+      setCategories(sortByLabel(categories, categoryName, locale));
       setRules((ruleResult.data ?? []) as RuleWithSlots[]);
       setProfile(profileResult.data as Profile | null);
       setGamification(gameResult.data as GamificationState | null);
@@ -149,7 +149,7 @@ export function SupabaseToolsPage({ section }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [settings]);
+  }, [categoryName, locale, settings]);
 
   useEffect(() => {
     let active = true;

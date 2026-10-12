@@ -22,6 +22,20 @@ export interface LabelTarget {
   name?: string | null;
 }
 
+export function sortByLabel<T extends LabelTarget>(
+  targets: readonly T[],
+  translate: (key: string) => string,
+  locale: string
+): T[] {
+  const collator = new Intl.Collator(locale, { sensitivity: "base", numeric: true });
+  return [...targets].sort((left, right) =>
+    collator.compare(
+      resolveLabel(left, translate) ?? "",
+      resolveLabel(right, translate) ?? ""
+    )
+  );
+}
+
 /**
  * Sufiks uniqueness hanya dibuang kalau benar-benar terlihat seperti token
  * hasil generator: >= 5 karakter dan mengandung angka. Ambang 5 itu yang
