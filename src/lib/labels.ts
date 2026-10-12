@@ -42,7 +42,7 @@ export function sortByLabel<T extends LabelTarget>(
  * membuat `lainnya-ex` / `lainnya-in` tetap utuh, sementara
  * `hiburan-d22co` -> `hiburan`.
  */
-function stripGeneratedSuffix(slug: string): string {
+export function stripGeneratedSuffix(slug: string): string {
   const base = slug.slice(0, slug.lastIndexOf("-") + 1);
   const suffix = slug.slice(base.length);
   // Tanpa tanda hubung, atau sufiks yang bukan token generator (terlalu pendek

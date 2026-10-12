@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Category, CategoryType } from "@/src/lib/types";
+import { stripGeneratedSuffix } from "@/src/lib/labels";
 
 type CategorySeed = {
   type: CategoryType;
@@ -236,6 +237,39 @@ export function missingDefaultCategories(
   return DEFAULT_CATEGORIES.filter(({ type, slug }) => !existingKeys.has(`${type}:${slug}`));
 }
 
+/**
+ * Skor kelayakan satu baris menjadi representasi tunggal untuk sebuah label.
+ * Lebih rendah = menang, dibaca sebagai bit: `hasSuffix` (bit 2), `isShared`
+ * (bit 1), `isSystem` (bit 0).
+ *
+ * Slug bersufiks generator (`hiburan-d22c0e0e`) selalu kalah dari slug polos
+ * yang ia warisi, karena hanya slug polos yang membawa `name_key` translasi.
+ * Baris katalog sistem (`user_id` NULL) kalah dari salinan milik pengguna.
+ */
+function dedupeRank(category: Pick<Category, "user_id" | "slug" | "is_system">): number {
+  const slug = category.slug.trim();
+  const hasSuffix = stripGeneratedSuffix(slug) === slug ? 0 : 1;
+  const isShared = category.user_id === null ? 1 : 0;
+  const isSystem = category.is_system ? 1 : 0;
+  return (hasSuffix << 2) | (isShared << 1) | isSystem;
+}
+
+export function dedupeCategories<T extends Pick<Category, "id" | "user_id" | "type" | "slug" | "is_system">>(
+  categories: readonly T[]
+): T[] {
+  const chosen = new Map<string, { category: T; rank: number }>();
+
+  for (const category of categories) {
+    const slug = category.slug.trim();
+    const key = `${category.type}:${stripGeneratedSuffix(slug)}`;
+    const rank = dedupeRank(category);
+    const current = chosen.get(key);
+    if (!current || rank < current.rank) chosen.set(key, { category, rank });
+  }
+
+  return Array.from(chosen.values(), (entry) => entry.category);
+}
+
 export async function ensureDefaultCategories(
   supabase: SupabaseClient,
   userId: string
@@ -270,5 +304,5 @@ export async function ensureDefaultCategories(
     .or(filter)
     .order("is_system", { ascending: false });
   if (error) throw error;
-  return (data as Category[]) ?? [];
+  return dedupeCategories((data as Category[]) ?? []);
 }
