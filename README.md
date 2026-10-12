@@ -9,10 +9,10 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
 2. Buka **SQL Editor**:
     - Proyek baru: jalankan seluruh isi
       [`supabase/migrations/0001_init.sql`](./supabase/migrations/0001_init.sql),
-      lalu migrasi `0002` sampai `0018` secara berurutan.
+      lalu migrasi `0002` sampai `0019` secara berurutan.
    - Proyek yang sudah memiliki sebagian tabel: jalankan
      [`supabase/migrations/0002_complete_supabase_schema.sql`](./supabase/migrations/0002_complete_supabase_schema.sql).
-     Lanjutkan dengan migrasi `0003` sampai `0018` secara berurutan. Migrasi
+     Lanjutkan dengan migrasi `0003` sampai `0019` secara berurutan. Migrasi
      `0002` aman dijalankan berulang kali dan melengkapi tabel yang belum ada.
      Jangan jalankan ulang `0001` pada proyek yang sudah memiliki tabel karena
      beberapa kebijakan di dalamnya tidak dibuat secara idempoten.
@@ -44,7 +44,9 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
        dan
        [`0017_preserve_user_categories_on_reset.sql`](./supabase/migrations/0017_preserve_user_categories_on_reset.sql),
        lalu
-       [`0018_restore_system_categories.sql`](./supabase/migrations/0018_restore_system_categories.sql).
+       [`0018_restore_system_categories.sql`](./supabase/migrations/0018_restore_system_categories.sql),
+       lalu
+       [`0019_add_expense_categories.sql`](./supabase/migrations/0019_add_expense_categories.sql).
 
       Jalankan migrasi `0017` untuk memperbarui fitur reset agar tetap menghapus
       transaksi dan data keuangan lainnya, tetapi mempertahankan kategori buatan
@@ -56,10 +58,17 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
       menghapus kategori buatan pengguna. Kategori buatan pengguna yang sudah
       terhapus sebelum `0017` tetap hanya dapat dikembalikan dari backup.
 
-      Saat halaman keuangan dibuka, aplikasi juga memastikan 13 kategori bawaan
+      Saat halaman keuangan dibuka, aplikasi juga memastikan 27 kategori bawaan
       tersimpan untuk akun yang sedang masuk. Jadi kategori yang hilang tetap
       dipulihkan pada akun tersebut tanpa membuat kategori duplikat, dan transaksi
       tetap menyimpan referensi kategori database yang valid.
+
+      Migrasi `0019` dan katalog aplikasi menambahkan kategori pengeluaran umum
+      seperti Self Reward, Keluarga, Anak, Rumah Tangga, Perawatan Diri,
+      Komunikasi & Internet, Kendaraan, Hewan Peliharaan, Hadiah, Donasi,
+      Langganan, Olahraga, Liburan, dan Pajak. Kategori ini otomatis dilengkapi
+      untuk akun yang membuka halaman keuangan; migrasi `0019` menambahkannya
+      sebagai kategori bawaan bersama.
 
       Alasannya: `0001` memakai `create table if not exists`, jadi pada tabel yang
       sudah ada setiap perintah itu dilewati tanpa mengubah apa pun. Skrip lalu

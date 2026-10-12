@@ -496,7 +496,21 @@
     "hiburan": "Hiburan",
     "kesehatan": "Kesehatan",
     "pendidikan": "Pendidikan",
-    "expenseLain": "Pengeluaran Lain"
+    "expenseLain": "Pengeluaran Lain",
+    "selfReward": "Self Reward",
+    "family": "Keluarga",
+    "children": "Anak",
+    "household": "Rumah Tangga",
+    "personalCare": "Perawatan Diri",
+    "communication": "Komunikasi & Internet",
+    "vehicle": "Kendaraan",
+    "pets": "Hewan Peliharaan",
+    "gifts": "Hadiah",
+    "donations": "Donasi",
+    "subscriptions": "Langganan",
+    "fitness": "Olahraga",
+    "travel": "Liburan",
+    "tax": "Pajak"
   },
   "ach": {
     "firstTx": { "name": "Langkah Pertama", "desc": "Catat transaksi pertama." },

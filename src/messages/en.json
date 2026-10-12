@@ -496,7 +496,21 @@
     "hiburan": "Entertainment",
     "kesehatan": "Health",
     "pendidikan": "Education",
-    "expenseLain": "Other Expense"
+    "expenseLain": "Other Expense",
+    "selfReward": "Self-reward",
+    "family": "Family",
+    "children": "Children",
+    "household": "Household",
+    "personalCare": "Personal Care",
+    "communication": "Communication & Internet",
+    "vehicle": "Vehicle",
+    "pets": "Pets",
+    "gifts": "Gifts",
+    "donations": "Donations",
+    "subscriptions": "Subscriptions",
+    "fitness": "Fitness",
+    "travel": "Travel",
+    "tax": "Taxes"
   },
   "ach": {
     "firstTx": { "name": "First Step", "desc": "Record your first transaction." },
