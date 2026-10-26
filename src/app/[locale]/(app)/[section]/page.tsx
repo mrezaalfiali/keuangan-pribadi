@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { CalculatorPage } from "@/src/components/calculator-page";
 import { SupabaseFinancePage } from "@/src/components/supabase-finance-page";
 import { SupabaseToolsPage } from "@/src/components/supabase-tools-page";
+import { NotesPage } from "@/src/components/notes-page";
 
 const SECTIONS = [
   "dashboard",
@@ -9,6 +10,7 @@ const SECTIONS = [
   "allocation",
   "vaults",
   "budgets",
+  "notes",
   "rewards",
   "calculator",
   "about",
@@ -29,6 +31,10 @@ export default async function LocalSectionPage({
 
   if (section === "calculator") {
     return <CalculatorPage />;
+  }
+
+  if (section === "notes") {
+    return <NotesPage />;
   }
 
   if (

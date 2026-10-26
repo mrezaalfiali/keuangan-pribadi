@@ -13,6 +13,7 @@ import {
   LogOut,
   Sparkles,
   WalletCards,
+  Plus,
 } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { Link, usePathname } from "@/src/i18n/navigation";
@@ -117,6 +118,21 @@ export function AppShell({
               <span className="num font-semibold text-ink">{points.toLocaleString("id-ID")}</span>
               <span className="text-xs text-faint">pts</span>
             </div>
+            <Link
+              href="/notes"
+              aria-label={t("nav.notes")}
+              aria-current={pathname === "/notes" ? "page" : undefined}
+              title={t("nav.notes")}
+              className={cn(
+                "inline-flex h-10 w-10 items-center justify-center gap-2 rounded-xl border border-line transition-colors sm:w-auto sm:px-3",
+                pathname === "/notes"
+                  ? "bg-surface2 text-ink"
+                  : "bg-surface text-muted hover:bg-surface2 hover:text-ink"
+              )}
+            >
+              <Plus size={18} />
+              <span className="hidden text-sm font-medium sm:inline">{t("nav.notes")}</span>
+            </Link>
             <LocaleSwitcher />
             <ThemeToggle />
             <form action={signOutAction}>

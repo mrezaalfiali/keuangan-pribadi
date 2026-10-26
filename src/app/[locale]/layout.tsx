@@ -72,12 +72,6 @@ export default async function LocaleLayout({
       className={`${spaceGrotesk.variable} ${figtree.variable} h-full antialiased dark`}
     >
       <body className="flex min-h-screen flex-col">
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              'try{var t=localStorage.getItem("kp-theme");document.documentElement.classList.toggle("light",t==="light");document.documentElement.classList.toggle("dark",t!=="light")}catch(e){}',
-          }}
-        />
         <ThemeProvider>
           <PwaRegister />
           <NextIntlClientProvider messages={messages}>

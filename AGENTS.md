@@ -19,7 +19,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - Tidak ada Supabase CLI dan tidak ada ledger `supabase_migrations.schema_migrations`. Setiap file di `supabase/migrations/` dijalankan manual lewat SQL Editor, berurutan dari `0001`.
 - **Jangan jalankan `supabase db push`** — akan mengeksekusi ulang seluruh migrasi dari awal terhadap data berisi.
 - Migrasi baru = file bernomor berikutnya. Harus idempoten (aman dijalankan ulang), diakhiri query verifikasi bila menyentuh data, dan policy yang dibuat harus konsisten dengan `0001_init.sql`.
-- Status terakhir: `0020` menggabungkan baris kategori bersufiks, `0021` menyelaraskan katalog bersama. Verifikasi yang diharapkan: 4 policy `categories`, 27 baris `user_id is null`, 0 baris duplikat.
+- Status terakhir: `0020` menggabungkan baris kategori bersufiks, `0021` menyelaraskan katalog bersama, `0022` menambahkan `category_overrides` untuk rename/hide sumber per akun, dan `0023` menambahkan catatan privat per akun (jalankan manual setelah migrasi sebelumnya). Verifikasi yang diharapkan: 4 policy `categories`, 27 baris `user_id is null`, 0 baris duplikat, 1 tabel + 1 policy `category_overrides`, 1 tabel + 1 policy `notes`.
 
 ## Invarian kategori
 

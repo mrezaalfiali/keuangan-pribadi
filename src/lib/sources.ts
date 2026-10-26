@@ -41,8 +41,36 @@ export interface SourceCategory {
   name?: string | null;
   icon?: string | null;
   color?: string | null;
-  /** Sumber bawaan tidak bisa dihapus dari UI. */
+  /** Penanda baris katalog bersama; bukan larangan edit/hapus per akun. */
   is_system?: boolean;
+}
+
+/** Override nama/visibilitas satu sumber untuk satu akun. */
+export interface SourceOverride {
+  category_id: string;
+  custom_name: string | null;
+  hidden: boolean;
+}
+
+/**
+ * Terapkan override per akun ke katalog sumber.
+ *
+ * Baris yang di-hide dibuang dari daftar, sedangkan baris yang di-rename
+ * memakai `name_key` baru agar `resolveLabel` langsung membacanya sebagai
+ * teks literal. `slug` sengaja tidak diubah: ia identifier yang masih dipakai
+ * transaksi lama dan kunci dedupe katalog.
+ */
+export function applySourceOverrides<T extends Pick<SourceCategory, "id" | "name_key">>(
+  sources: readonly T[],
+  overrides: readonly SourceOverride[]
+): T[] {
+  const byCategory = new Map(overrides.map((row) => [row.category_id, row]));
+  return sources.flatMap((source) => {
+    const override = byCategory.get(source.id);
+    if (override?.hidden) return [];
+    const name = override?.custom_name?.trim();
+    return [name ? { ...source, name_key: name } : source];
+  });
 }
 
 /**

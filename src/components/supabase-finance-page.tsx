@@ -11,11 +11,13 @@ import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/actions/transactions";
-import { createIncomeSource, deleteIncomeSource } from "@/src/lib/actions/categories";
+import { createIncomeSource, deleteIncomeSource, updateIncomeSource } from "@/src/lib/actions/categories";
 import {
+  applySourceOverrides,
   computeSourceVaultBalances,
   sourceVaultBalance,
   summarizeSources,
+  type SourceOverride,
   type SourceSummary,
 } from "@/src/lib/sources";
 import { resolveLabel, humanizeSlug, sortByLabel } from "@/src/lib/labels";
@@ -271,6 +273,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [transactions, setTransactions] = useState<TxRow[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [sourceOverrides, setSourceOverrides] = useState<SourceOverride[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTransaction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -297,6 +300,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [sourceName, setSourceName] = useState("");
   const [sourceFormError, setSourceFormError] = useState("");
   const [savingSource, setSavingSource] = useState(false);
+  const [editingSourceId, setEditingSourceId] = useState("");
+  const [editingSourceName, setEditingSourceName] = useState("");
+  const [sourceEditError, setSourceEditError] = useState("");
   const [filterType, setFilterType] = useState<"" | "income" | "expense">("");
   const [filterMonth, setFilterMonth] = useState("");
   const [filterFromDate, setFilterFromDate] = useState("");
@@ -324,10 +330,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   /**
    * Nama kategori dan vault, diseragamkan dengan halaman Alokasi/Anggaran
    * lewat `resolveLabel` supaya `slug` yang hopeful bocor tidak pernah tampil.
+   * Override sumber menang atas nama katalog agar transaksi lama ikut berubah
+   * label setelah sumber di-rename, termasuk sumber yang sudah disembunyikan.
    */
+  const sourceOverridesById = useMemo(
+    () => new Map(sourceOverrides.map((row) => [row.category_id, row])),
+    [sourceOverrides]
+  );
   const categoryLabel = useCallback(
-    (category: CategoryRef | null | undefined) => resolveLabel(category, categoryName),
-    [categoryName]
+    (category: CategoryRef | null | undefined) => {
+      const custom = category ? sourceOverridesById.get(category.id)?.custom_name?.trim() : "";
+      return custom || resolveLabel(category, categoryName);
+    },
+    [categoryName, sourceOverridesById]
   );
 
   const vaultLabel = useCallback(
@@ -349,7 +364,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       if (authError) throw authError;
       if (!user) throw new Error("Session Supabase tidak ditemukan.");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [txResult, vaultResult, budgetResult, recurringResult] = await Promise.all([
+      const [txResult, vaultResult, budgetResult, recurringResult, overrideResult] = await Promise.all([
         supabase.from("transactions")
           .select("*, vault:vaults(id,slug,name,is_locked), category:categories!transactions_category_id_fkey(id,slug,name_key), funding:categories!transactions_funding_source_id_fkey(id,slug,name_key)")
           .eq("user_id", user.id)
@@ -366,14 +381,24 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           .select("*")
           .eq("user_id", user.id)
           .order("due_on", { ascending: true }),
+        supabase.from("category_overrides")
+          .select("category_id, custom_name, hidden")
+          .eq("user_id", user.id),
       ]);
       if (txResult.error) throw txResult.error;
       if (vaultResult.error) throw vaultResult.error;
       if (budgetResult.error) throw budgetResult.error;
       if (recurringResult.error) throw recurringResult.error;
+      if (overrideResult.error) {
+        // Migrasi 0022 dijalankan manual. Jangan kunci seluruh dashboard hanya
+        // karena tabel override belum ada; sumber tetap tampil dengan nama asli.
+        logSupabaseError("finance.loadSourceOverrides", overrideResult.error);
+      }
+      const overrides = (overrideResult.data ?? []) as SourceOverride[];
       setTransactions((txResult.data ?? []) as TxRow[]);
       setVaults((vaultResult.data ?? []) as Vault[]);
-      setCategories(sortByLabel(categories, categoryName, locale));
+      setSourceOverrides(overrides);
+      setCategories(sortByLabel(applySourceOverrides(categories, overrides), categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
     } catch (loadError) {
@@ -579,7 +604,25 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setFilterSearch("");
   }
 
-  function recurringErrorMessage(code: string | undefined) {
+  function budgetExceededText(
+    code: string | undefined,
+    remaining: number | undefined
+  ): string | null {
+    if (code === "transactions.budgetExceededCategory") {
+      return txText("budgetExceededCategory", { amount: formatMoney(remaining ?? 0, locale) });
+    }
+    if (code === "transactions.budgetExceededVault") {
+      return txText("budgetExceededVault", { amount: formatMoney(remaining ?? 0, locale) });
+    }
+    return null;
+  }
+
+  function recurringErrorMessage(
+    code: string | undefined,
+    budget?: { scope: "category" | "vault"; remaining: number }
+  ) {
+    const budgetText = budgetExceededText(code, budget?.remaining);
+    if (budgetText) return budgetText;
     switch (code) {
       case "err.auth": return txText("recurringAuthError");
       case "err.amount": return txText("recurringAmountError");
@@ -679,7 +722,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         allocationMode: allocationMode === "single" ? "single" : "auto",
       });
       if (!result.ok) {
-        setError(recurringErrorMessage(result.error));
+        setError(recurringErrorMessage(result.error, result.budget));
         return;
       }
       setNotice(txText("recurringRecorded"));
@@ -744,7 +787,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setRecurringFormOpen(true);
   }
 
-  function transactionError(code: string | undefined) {
+  function transactionError(
+    code: string | undefined,
+    budget?: { scope: "category" | "vault"; remaining: number }
+  ) {
+    const budgetText = budgetExceededText(code, budget?.remaining);
+    if (budgetText) return budgetText;
     if (code === "transactions.lockedError") return txText("lockedError");
     if (code === "transactions.noSource") return emptySourceHint;
     if (code === "transactions.sourceNotInVault") return txText("sourceNotInVault");
@@ -755,12 +803,24 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     return settings("saveError");
   }
 
-  function sourceFormErrorMessage(code: string | undefined) {
+  function sourceFormErrorMessage(code: string | undefined, name: string = sourceName) {
     if (code === "transactions.sourceExists") return txText("sourceExists");
     if (code === "transactions.sourceNameTakenSystem") {
-      return txText("sourceNameTakenSystem", { name: sourceName.trim() });
+      return txText("sourceNameTakenSystem", { name: name.trim() });
     }
+    if (code === "transactions.sourceHasBalance") return txText("sourceHasBalance");
+    if (code === "transactions.sourceUsedByRecurring") return txText("sourceUsedByRecurring");
+    if (code === "transactions.sourceFallbackProtected") return txText("sourceFallbackProtected");
+    if (code === "transactions.sourceNotFound") return txText("sourceNotFound");
     return settings("saveError");
+  }
+
+  function sourceDeleteErrorMessage(code: string | undefined) {
+    if (code === "transactions.sourceHasBalance") return txText("sourceHasBalance");
+    if (code === "transactions.sourceUsedByRecurring") return txText("sourceUsedByRecurring");
+    if (code === "transactions.sourceFallbackProtected") return txText("sourceFallbackProtected");
+    if (code === "transactions.sourceNotFound") return txText("sourceNotFound");
+    return settings("deleteError");
   }
 
   async function submitSource(event: FormEvent<HTMLFormElement>) {
@@ -784,16 +844,44 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
+  async function saveSourceEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = editingSourceName.trim();
+    if (!editingSourceId || !name) return;
+    setSavingSource(true);
+    setSourceEditError("");
+    try {
+      const result = await updateIncomeSource(locale, editingSourceId, name);
+      if (!result.ok) {
+        setSourceEditError(sourceFormErrorMessage(result.error, name));
+        return;
+      }
+      setEditingSourceId("");
+      setEditingSourceName("");
+      await load();
+      setNotice(txText("sourceUpdated"));
+    } catch (saveError) {
+      console.error("Supabase income source rename failed.", saveError);
+      setSourceEditError(settings("saveError"));
+    } finally {
+      setSavingSource(false);
+    }
+  }
+
   async function removeSource(source: SourceSummary) {
     if (!window.confirm(txText("deleteSourceConfirm"))) return;
     setError("");
     try {
       const result = await deleteIncomeSource(locale, source.source.id);
       if (!result.ok) {
-        setError(settings("deleteError"));
+        setError(sourceDeleteErrorMessage(result.error));
         return;
       }
+      if (editingSourceId === source.source.id) setEditingSourceId("");
       if (filterCategory === source.source.id) setFilterCategory("");
+      if (filterFundingSource === source.source.id) setFilterFundingSource("");
+      if (formFundingSourceId === source.source.id) setFormFundingSourceId("");
+      if (editFundingSourceId === source.source.id) setEditFundingSourceId("");
       await load();
     } catch (deleteError) {
       console.error("Supabase income source delete failed.", deleteError);
@@ -839,7 +927,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         note: String(data.get("note") ?? "").trim() || null,
       });
       if (!result.ok) {
-        setFormError(transactionError(result.error));
+        setFormError(transactionError(result.error, result.budget));
         return;
       }
       if (result.rewardError) {
@@ -920,7 +1008,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         note: String(formData.get("note") ?? "") || null,
       });
       if (!result.ok) {
-        if (result.error === "transactions.insufficientSource") setEditError(txText("insufficientSource"));
+        const budgetText = budgetExceededText(result.error, result.budget?.remaining);
+        if (budgetText) setEditError(budgetText);
+        else if (result.error === "transactions.insufficientSource") setEditError(txText("insufficientSource"));
         else if (result.error === "transactions.sourceNotInVault") setEditError(txText("sourceNotInVault"));
         else if (result.error === "transactions.noSource") setEditError(emptySourceHint);
         else if (result.error === "transactions.insufficient") setEditError(txText("insufficient"));
@@ -1116,7 +1206,13 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               <li key={alert.id}>
                 <span className="font-medium">{alert.label}</span>
                 {" · "}
-                {dashboard(alert.status === "exceeded" ? "overBudget" : "nearBudget")}
+                {dashboard(
+                  alert.status === "exceeded"
+                    ? "overBudget"
+                    : alert.status === "full"
+                      ? "fullBudget"
+                      : "nearBudget"
+                )}
                 {" — "}
                 {dashboard("budgetUsed", {
                   used: formatMoney(alert.spent, locale),
@@ -1552,24 +1648,79 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               <ul className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 {sourceSummaries.map((summary) => (
                   <li key={summary.source.id} className="rounded-2xl border border-line bg-bg1 p-4">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium text-ink">{sourceLabel(summary)}</p>
-                        <p className="text-xs text-faint">
-                          {txText("sourceIncome")} {formatMoney(summary.income, locale)} · {txText("sourceExpense")} {formatMoney(summary.expense, locale)}
-                        </p>
+                    {editingSourceId === summary.source.id ? (
+                      <form onSubmit={saveSourceEdit} className="grid gap-2">
+                        <div className="flex items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            <Input
+                              value={editingSourceName}
+                              maxLength={80}
+                              autoFocus
+                              aria-label={txText("sourceName")}
+                              onChange={(event) => {
+                                setEditingSourceName(event.target.value);
+                                if (sourceEditError) setSourceEditError("");
+                              }}
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={savingSource || !editingSourceName.trim()}
+                            aria-label={common("save")}
+                            className="shrink-0 rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink disabled:opacity-50"
+                          >
+                            <Check size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            disabled={savingSource}
+                            onClick={() => {
+                              setEditingSourceId("");
+                              setEditingSourceName("");
+                              setSourceEditError("");
+                            }}
+                            aria-label={common("cancel")}
+                            className="shrink-0 rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink disabled:opacity-50"
+                          >
+                            <X size={15} />
+                          </button>
+                        </div>
+                        {sourceEditError && <p className="text-xs text-danger">{sourceEditError}</p>}
+                      </form>
+                    ) : (
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-ink">{sourceLabel(summary)}</p>
+                          <p className="text-xs text-faint">
+                            {txText("sourceIncome")} {formatMoney(summary.income, locale)} · {txText("sourceExpense")} {formatMoney(summary.expense, locale)}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingSourceId(summary.source.id);
+                              setEditingSourceName(sourceLabel(summary));
+                              setSourceEditError("");
+                            }}
+                            aria-label={txText("editSource")}
+                            className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-ink"
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          {summary.source.slug !== "lainnya-in" && summary.source.slug !== "lainnya" && (
+                            <button
+                              type="button"
+                              onClick={() => void removeSource(summary)}
+                              aria-label={txText("deleteSource")}
+                              className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-danger"
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                      {!summary.source.is_system && (
-                        <button
-                          type="button"
-                          onClick={() => void removeSource(summary)}
-                          aria-label={txText("deleteSource")}
-                          className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-danger"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      )}
-                    </div>
+                    )}
                     <p
                       className={`num mt-3 text-lg font-semibold tracking-tight ${
                         summary.balance > 0 ? "text-ink" : summary.balance < 0 ? "text-danger" : "text-faint"

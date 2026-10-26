@@ -32,7 +32,86 @@ export function budgetSpend(
   }, 0);
 }
 
-export type BudgetStatus = "ok" | "warning" | "exceeded";
+export type BudgetTransaction = Pick<
+  Transaction,
+  "type" | "amount" | "category_id" | "vault_id" | "date"
+> & { id?: number };
+
+export interface ExpenseCandidate {
+  amount: number;
+  date: string;
+  category_id: string | null;
+  vault_id: string | null;
+}
+
+export interface BudgetConflict {
+  budget: Pick<Budget, "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on">;
+  /** Pemakaian sebelum transaksi baru, tanpa baris yang sedang diedit. */
+  spent: number;
+  /** Sisa sebelum transaksi baru; tidak pernah negatif. */
+  remaining: number;
+  /** Pemakaian setelah transaksi baru ditambahkan. */
+  projected: number;
+}
+
+/**
+ * Cari anggaran yang akan terlampaui oleh satu pengeluaran.
+ *
+ * Periode dipilih dari tanggal transaksi, bukan hari ini, sehingga transaksi
+ * bertanggal mundur tetap dicek terhadap anggaran periode yang benar. Baris
+ * yang sedang diedit dikeluarkan lewat `excludeTransactionId` agar nominal
+ * lamanya tidak dihitung dua kali.
+ *
+ * Tepat sama dengan batas masih dianggap aman; hanya nilai di atas batas yang
+ * mengembalikan konflik.
+ */
+export function findExceededBudget(
+  transactions: readonly BudgetTransaction[],
+  budgets: readonly Pick<
+    Budget,
+    "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on"
+  >[],
+  candidate: ExpenseCandidate,
+  excludeTransactionId?: number
+): BudgetConflict | null {
+  const amount = Number(candidate.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+
+  let worst: BudgetConflict | null = null;
+
+  for (const budget of budgets) {
+    if (candidate.date < budget.starts_on || candidate.date > budget.ends_on) continue;
+
+    const matchesScope =
+      budget.scope === "category"
+        ? candidate.category_id === budget.scope_id
+        : candidate.vault_id === budget.scope_id;
+    if (!matchesScope) continue;
+
+    const spent = budgetSpend(
+      transactions.filter(
+        (tx) => excludeTransactionId === undefined || tx.id !== excludeTransactionId
+      ),
+      budget
+    );
+    const projected = spent + amount;
+    if (projected <= budget.limit_amount) continue;
+
+    const conflict: BudgetConflict = {
+      budget,
+      spent,
+      remaining: budgetLeftover(budget.limit_amount, spent),
+      projected,
+    };
+    if (!worst || conflict.projected - conflict.budget.limit_amount > worst.projected - worst.budget.limit_amount) {
+      worst = conflict;
+    }
+  }
+
+  return worst;
+}
+
+export type BudgetStatus = "ok" | "warning" | "full" | "exceeded";
 
 /**
  * `alert_threshold` default-nya 0,8, jadi 80% dari batas sudah memicu peringatan
@@ -46,6 +125,7 @@ export function budgetStatus(
 ): BudgetStatus {
   if (limit <= 0) return "ok";
   if (spent > limit) return "exceeded";
+  if (spent === limit) return "full";
   if (spent >= limit * threshold) return "warning";
   return "ok";
 }

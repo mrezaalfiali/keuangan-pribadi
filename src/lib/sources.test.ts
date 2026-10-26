@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applySourceOverrides,
   availableSources,
   computeSourceBalances,
   computeSourceVaultBalances,
@@ -222,6 +223,38 @@ describe("computeSourceVaultBalances", () => {
     const balances = computeSourceVaultBalances(rows);
     const total = [gaji.id, magang.id].reduce((sum, id) => sum + sourceVaultBalance(balances, id, VAULT_A), 0);
     expect(total).toBe(3_100_000);
+  });
+});
+
+describe("applySourceOverrides", () => {
+  it("mengganti nama hanya untuk sumber yang punya override", () => {
+    const result = applySourceOverrides([gaji, magang], [
+      { category_id: gaji.id, custom_name: "Gaji Utama", hidden: false },
+    ]);
+    expect(result.map((source) => source.name_key)).toEqual(["Gaji Utama", "Magang"]);
+    expect(result[0]?.slug).toBe("gaji");
+  });
+
+  it("membuang sumber yang disembunyikan", () => {
+    const result = applySourceOverrides([gaji, magang], [
+      { category_id: gaji.id, custom_name: null, hidden: true },
+    ]);
+    expect(result.map((source) => source.id)).toEqual([magang.id]);
+  });
+
+  it("mengabaikan nama override kosong dan tetap memakai nama asli", () => {
+    const result = applySourceOverrides([gaji], [
+      { category_id: gaji.id, custom_name: "   ", hidden: false },
+    ]);
+    expect(result[0]?.name_key).toBe("cat.gaji");
+  });
+
+  it("tidak mengubah daftar asli", () => {
+    const sources = [gaji, magang];
+    applySourceOverrides(sources, [
+      { category_id: gaji.id, custom_name: "Gaji Baru", hidden: true },
+    ]);
+    expect(sources).toEqual([gaji, magang]);
   });
 });
 

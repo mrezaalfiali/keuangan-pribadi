@@ -6,6 +6,7 @@ import {
   budgetState,
   budgetStatus,
   defaultBudgetPeriod,
+  findExceededBudget,
   isValidPeriod,
   nextPeriod,
   paydayLabel,
@@ -18,7 +19,9 @@ import type { Transaction } from "@/src/lib/types";
 // Periode mengikuti gaji: 10 Mar..9 Apr.
 const PERIOD = { starts_on: "2026-03-10", ends_on: "2026-04-09" };
 
-type TxSlice = Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date">;
+type TxSlice = Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> & {
+  id?: number;
+};
 
 function tx(over: Partial<TxSlice> = {}): TxSlice {
   return {
@@ -108,6 +111,7 @@ describe("budgetStatus", () => {
     ["ok", 700_000, 1_000_000],
     ["warning", 800_000, 1_000_000],
     ["warning", 900_000, 1_000_000],
+    ["full", 1_000_000, 1_000_000],
     ["exceeded", 1_000_001, 1_000_000],
   ];
   for (const [expected, spent, limit, threshold] of cases) {
@@ -384,6 +388,94 @@ describe("periodRange", () => {
     expect(periodRange({ startsOn: "salah", endsOn: "2026-04-09" }, "id")).toBe(
       "salah - 2026-04-09"
     );
+  });
+});
+
+describe("findExceededBudget", () => {
+  const categoryBudget = {
+    id: "budget-food",
+    scope: "category" as const,
+    scope_id: "cat-food",
+    limit_amount: 500_000,
+    ...PERIOD,
+  };
+  const vaultBudget = {
+    id: "budget-vault",
+    scope: "vault" as const,
+    scope_id: "vault-a",
+    limit_amount: 300_000,
+    ...PERIOD,
+  };
+  const candidate = {
+    amount: 150_000,
+    date: "2026-03-20",
+    category_id: "cat-food",
+    vault_id: "vault-a",
+  };
+
+  it("null saat pemakaian masih di bawah batas", () => {
+    const rows = [tx({ amount: 100_000, category_id: "cat-food", vault_id: "vault-a" })];
+    expect(findExceededBudget(rows, [categoryBudget], candidate)).toBeNull();
+  });
+
+  it("nominal tepat sama dengan batas masih boleh", () => {
+    const rows = [tx({ amount: 350_000, category_id: "cat-food", vault_id: "vault-a" })];
+    expect(findExceededBudget(rows, [categoryBudget], candidate)).toBeNull();
+  });
+
+  it("mengembalikan sisa sebelum transaksi dan proyeksi setelahnya", () => {
+    const rows = [tx({ amount: 400_000, category_id: "cat-food", vault_id: "vault-a" })];
+    const conflict = findExceededBudget(rows, [categoryBudget], candidate);
+    expect(conflict?.budget.scope).toBe("category");
+    expect(conflict?.spent).toBe(400_000);
+    expect(conflict?.remaining).toBe(100_000);
+    expect(conflict?.projected).toBe(550_000);
+  });
+
+  it("memakai tanggal transaksi, bukan tanggal hari ini", () => {
+    const rows = [tx({ amount: 450_000, category_id: "cat-food", date: "2026-04-01" })];
+    expect(
+      findExceededBudget(rows, [categoryBudget], { ...candidate, date: "2026-04-20" })
+    ).toBeNull();
+    expect(
+      findExceededBudget(rows, [categoryBudget], { ...candidate, date: "2026-04-01" })
+    ).not.toBeNull();
+  });
+
+  it("mengecualikan transaksi yang sedang diedit", () => {
+    const rows = [
+      tx({ id: 7, amount: 400_000, category_id: "cat-food", vault_id: "vault-a" }),
+      tx({ id: 8, amount: 20_000, category_id: "cat-food", vault_id: "vault-a" }),
+    ];
+    expect(
+      findExceededBudget(rows, [categoryBudget], candidate, 7)
+    ).toBeNull();
+    expect(findExceededBudget(rows, [categoryBudget], candidate)).not.toBeNull();
+  });
+
+  it("memeriksa scope vault walaupun kategori tidak cocok", () => {
+    const rows = [tx({ amount: 200_000, category_id: "cat-other", vault_id: "vault-a" })];
+    const conflict = findExceededBudget(
+      rows,
+      [vaultBudget],
+      { ...candidate, category_id: "cat-other" }
+    );
+    expect(conflict?.budget.scope).toBe("vault");
+    expect(conflict?.remaining).toBe(100_000);
+  });
+
+  it("memilih pelanggaran dengan kelebihan terbesar", () => {
+    const rows = [tx({ amount: 450_000, category_id: "cat-food", vault_id: "vault-a" })];
+    const conflict = findExceededBudget(rows, [vaultBudget, categoryBudget], candidate);
+    expect(conflict?.budget.id).toBe("budget-vault");
+  });
+
+  it("null untuk scope atau nominal yang tidak valid", () => {
+    expect(
+      findExceededBudget([], [categoryBudget], { ...candidate, category_id: "cat-other" })
+    ).toBeNull();
+    expect(findExceededBudget([], [categoryBudget], { ...candidate, amount: NaN })).toBeNull();
+    expect(findExceededBudget([], [categoryBudget], { ...candidate, amount: 0 })).toBeNull();
   });
 });
 

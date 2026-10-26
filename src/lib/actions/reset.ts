@@ -25,6 +25,19 @@ export async function resetFinancialData(locale: string): Promise<ResetResult> {
     return { ok: false, error: "err.generic" };
   }
 
+  // Reset berarti kembali ke katalog sumber awal. Override nama/hide adalah
+  // preferensi terpisah dari RPC reset, jadi harus dibersihkan di sini.
+  const { error: overrideError } = await supabase
+    .from("category_overrides")
+    .delete()
+    .eq("user_id", user.id);
+  if (overrideError) {
+    console.error("Supabase source override reset failed.", {
+      code: overrideError.code,
+      message: overrideError.message,
+    });
+  }
+
   await revalidateFinance(locale);
   return { ok: true };
 }

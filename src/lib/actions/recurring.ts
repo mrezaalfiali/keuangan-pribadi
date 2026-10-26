@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import { todayJakartaISO } from "@/src/lib/recurring";
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
+import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
 
 type ActionResult = {
   ok: boolean;
@@ -11,6 +12,7 @@ type ActionResult = {
   points?: number;
   unlockedAchievements?: Array<{ nameKey: string; points: number }>;
   rewardError?: boolean;
+  budget?: { scope: "category" | "vault"; remaining: number };
 };
 
 interface RecurringInput {
@@ -205,6 +207,19 @@ export async function recordRecurringTransaction(
     const balances = computeSourceVaultBalances((rows ?? []) as PairTransaction[]);
     if (sourceVaultBalance(balances, input.fundingSourceId, input.vaultId) < amount) {
       return { ok: false, error: "transactions.sourceNotInVault" };
+    }
+
+    const budgetGuard = await checkExpenseBudget(supabase, user.id, {
+      amount,
+      date: input.transactionDate,
+      category_id: input.categoryId,
+      vault_id: input.vaultId,
+    });
+    if (!budgetGuard.ok) {
+      if ("conflict" in budgetGuard) {
+        return { ok: false, ...budgetRejection(budgetGuard.conflict) };
+      }
+      return { ok: false, error: budgetGuard.error };
     }
   } else {
     if (input.fundingSourceId) return { ok: false, error: "err.source" };

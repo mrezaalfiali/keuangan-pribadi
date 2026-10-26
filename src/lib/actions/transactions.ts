@@ -6,6 +6,7 @@ import { distributeAllocation, resolveIncomeAllocation, validateSlots, type Allo
 import { todayISO } from "@/src/lib/utils";
 import { vaultBalanceDelta, expenseVaultError } from "@/src/lib/vault-ledger";
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
+import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
 import type { AllocationSlot, Transaction } from "../types";
 
 export interface TxResult {
@@ -14,6 +15,7 @@ export interface TxResult {
   points?: number;
   unlockedAchievements?: Array<{ nameKey: string; points: number }>;
   rewardError?: boolean;
+  budget?: { scope: "category" | "vault"; remaining: number };
 }
 
 interface RewardPayload {
@@ -135,6 +137,21 @@ export async function addTransaction(
     );
     if (!check.ok) return check;
     base.funding_source_id = input.fundingSourceId ?? null;
+
+    // Anggaran adalah batas keras: tolak sebelum insert kalau nominal ini akan
+    // melewati anggaran kategori atau vault yang mencakup tanggal transaksi.
+    const budgetGuard = await checkExpenseBudget(supabase, user.id, {
+      amount,
+      date,
+      category_id: base.category_id ?? null,
+      vault_id: base.vault_id ?? null,
+    });
+    if (!budgetGuard.ok) {
+      if ("conflict" in budgetGuard) {
+        return { ok: false, ...budgetRejection(budgetGuard.conflict) };
+      }
+      return { ok: false, error: budgetGuard.error };
+    }
   } else {
     // transfer
     base.vault_id = input.vaultId ?? null;
@@ -511,6 +528,37 @@ export async function editTransaction(
     (input.note !== null && typeof input.note !== "string")
   ) {
     return { ok: false, error: "err.generic" };
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from("transactions")
+    .select("id, type")
+    .eq("id", input.id)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (existingError || !existing) return { ok: false, error: "err.generic" };
+
+  if (existing.type === "expense") {
+    // Hitung ulang tanpa baris ini, lalu proyeksikan nominal barunya. Dengan
+    // begitu menaikkan atau menurunkan nominal tetap dinilai terhadap anggaran
+    // periode tanggal yang baru.
+    const budgetGuard = await checkExpenseBudget(
+      supabase,
+      user.id,
+      {
+        amount,
+        date: input.date,
+        category_id: input.categoryId,
+        vault_id: input.vaultId,
+      },
+      input.id
+    );
+    if (!budgetGuard.ok) {
+      if ("conflict" in budgetGuard) {
+        return { ok: false, ...budgetRejection(budgetGuard.conflict) };
+      }
+      return { ok: false, error: budgetGuard.error };
+    }
   }
 
   const { error } = await supabase.rpc("edit_financial_transaction", {

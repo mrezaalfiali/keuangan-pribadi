@@ -2,11 +2,60 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
-import { sourceSlug } from "@/src/lib/sources";
+import { computeSourceBalances, sourceSlug } from "@/src/lib/sources";
 
 export interface CategoryResult {
   ok: boolean;
   error?: string;
+}
+
+interface SourceRow {
+  id: string;
+  user_id: string | null;
+  slug: string;
+  name_key: string | null;
+  is_system: boolean;
+}
+
+interface OverrideRow {
+  category_id: string;
+  custom_name: string | null;
+  hidden: boolean;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Nama yang terlihat oleh pemilik akun. Baris sistem memakai slug sebagai
+ * perkiraan nama karena teks aslinya ada di messages (`cat.*`); cukup untuk
+ * mencegah dua sumber tampil dengan nama yang sama.
+ */
+function visibleSourceName(source: SourceRow, overrides: Map<string, OverrideRow>): string {
+  const custom = overrides.get(source.id)?.custom_name?.trim();
+  if (custom) return custom;
+  const literal = source.name_key?.trim();
+  if (literal && !literal.startsWith("cat.")) return literal;
+  return source.slug.replace(/-(in|ex)$/, "");
+}
+
+async function loadSourceContext(supabase: Awaited<ReturnType<typeof createClient>>, userId: string) {
+  const [{ data: sources, error: sourceError }, { data: overrides, error: overrideError }] =
+    await Promise.all([
+      supabase
+        .from("categories")
+        .select("id, user_id, slug, name_key, is_system")
+        .eq("type", "income"),
+      supabase
+        .from("category_overrides")
+        .select("category_id, custom_name, hidden")
+        .eq("user_id", userId),
+    ]);
+  if (sourceError || overrideError) return null;
+
+  return {
+    sources: (sources ?? []) as SourceRow[],
+    overrides: new Map((overrides ?? []).map((row) => [row.category_id, row as OverrideRow])),
+  };
 }
 
 /**
@@ -31,33 +80,26 @@ export async function createIncomeSource(
   if (!user) return { ok: false, error: "err.auth" };
 
   const name = input.name.trim();
-  if (!name) return { ok: false, error: "transactions.sourceName" };
+  if (!name || name.length > 80) return { ok: false, error: "transactions.sourceName" };
 
   const slug = sourceSlug(name);
   if (!slug) return { ok: false, error: "transactions.sourceName" };
 
-  // Cek bentrok dengan kategori sistem di sini, bukan hanya mengandalkan 23505.
-  //
-  // Unique constraint 0001 itu `(coalesce(user_id, zero_uuid), slug)`: baris
-  // sistem punya `user_id` NULL, jadi slug yang sama milik pengguna lain TIDAK
-  // bentrok dengannya di database. Artinya "Investasi" bisa muncul dua kali di
-  // daftar — satu bawaan, satu milik user — dan keduanya akan tampil sebagai
-  // pilihan yang tidak bisa dibedakan. Menolak lebih awal dengan pesan yang
-  // menyebut nama aslinya jauh lebih berguna daripada 23505 yang kalau
-  // dibiarkan hanya jadi "terjadi kesalahan".
-  const { data: systemSource, error: systemError } = await supabase
-    .from("categories")
-    .select("slug")
-    .eq("type", "income")
-    .eq("slug", slug)
-    .is("user_id", null)
-    .limit(1)
-    .maybeSingle();
-  if (systemError) return { ok: false, error: "err.generic" };
-  if (systemSource) {
-    // Nama dikirim terpisah (state form), bukan ditanam di dalam kode error,
-    // supaya kodenya tetap cocok dengan key di messages/*.json.
-    return { ok: false, error: "transactions.sourceNameTakenSystem" };
+  const context = await loadSourceContext(supabase, user.id);
+  if (!context) return { ok: false, error: "err.generic" };
+
+  // Sumber sistem yang sudah di-hide tidak boleh menghalangi pengguna membuat
+  // sumber baru dengan nama yang sama. Sumber yang masih tampil tetap dicek
+  // dari slug maupun nama override agar tidak ada dua pilihan berlabel sama.
+  const conflict = context.sources.find((source) => {
+    if (context.overrides.get(source.id)?.hidden) return false;
+    return source.slug === slug || sourceSlug(visibleSourceName(source, context.overrides)) === slug;
+  });
+  if (conflict) {
+    return {
+      ok: false,
+      error: conflict.user_id === null ? "transactions.sourceNameTakenSystem" : "transactions.sourceExists",
+    };
   }
 
   const { error } = await supabase.from("categories").insert({
@@ -81,8 +123,92 @@ export async function createIncomeSource(
 }
 
 /**
- * Menghapus sumber pemasukan milik pengguna. Baris expense yang memakainya tetap
- * ada karena FK 0004 memakai ON DELETE SET NULL.
+ * Mengubah nama sumber pemasukan untuk akun ini saja.
+ *
+ * Sumber milik pengguna diubah langsung. Sumber bawaan (`user_id is null`)
+ * dicatat di `category_overrides` supaya akun lain tetap melihat nama aslinya.
+ */
+export async function updateIncomeSource(
+  locale: string,
+  categoryId: string,
+  nameInput: string
+): Promise<CategoryResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+  if (!UUID_PATTERN.test(categoryId)) return { ok: false, error: "err.generic" };
+
+  const name = nameInput.trim();
+  if (!name) return { ok: false, error: "transactions.sourceName" };
+  if (name.length > 80) return { ok: false, error: "transactions.sourceName" };
+
+  const { data: source, error: sourceError } = await supabase
+    .from("categories")
+    .select("id, user_id, slug, name_key, is_system")
+    .eq("id", categoryId)
+    .eq("type", "income")
+    .maybeSingle();
+  if (sourceError) return { ok: false, error: "err.generic" };
+  if (!source || (source.user_id !== null && source.user_id !== user.id)) {
+    return { ok: false, error: "transactions.sourceNotFound" };
+  }
+
+  const context = await loadSourceContext(supabase, user.id);
+  if (!context) return { ok: false, error: "err.generic" };
+
+  const slug = sourceSlug(name);
+  if (!slug) return { ok: false, error: "transactions.sourceName" };
+
+  const conflict = context.sources.find((candidate) => {
+    if (candidate.id === categoryId) return false;
+    if (context.overrides.get(candidate.id)?.hidden) return false;
+    return (
+      candidate.slug === slug ||
+      sourceSlug(visibleSourceName(candidate, context.overrides)) === slug
+    );
+  });
+  if (conflict) {
+    return {
+      ok: false,
+      error: conflict.user_id === null ? "transactions.sourceNameTakenSystem" : "transactions.sourceExists",
+    };
+  }
+
+  if (source.user_id === user.id) {
+    const { error } = await supabase
+      .from("categories")
+      .update({ name_key: name })
+      .eq("id", categoryId)
+      .eq("user_id", user.id)
+      .eq("type", "income");
+    if (error) return { ok: false, error: "err.generic" };
+  } else {
+    const { error } = await supabase.from("category_overrides").upsert(
+      {
+        user_id: user.id,
+        category_id: categoryId,
+        custom_name: name,
+        hidden: false,
+      },
+      { onConflict: "user_id,category_id" }
+    );
+    if (error) return { ok: false, error: "err.generic" };
+  }
+
+  revalidatePath(`/${locale}/dashboard`);
+  revalidatePath(`/${locale}/transactions`);
+  return { ok: true };
+}
+
+/**
+ * Menghapus sumber pemasukan dari akun ini.
+ *
+ * Sumber milik pengguna dihapus permanen; sumber bawaan hanya di-hide lewat
+ * `category_overrides`. Keduanya baru boleh dilakukan saat saldo sumber 0 agar
+ * uang yang masih tersimpan tidak hilang dari tampilan. Sumber fallback
+ * "Lainnya" tidak boleh dihapus karena dipakai validasi transaksi lama.
  */
 export async function deleteIncomeSource(
   locale: string,
@@ -93,15 +219,84 @@ export async function deleteIncomeSource(
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { ok: false, error: "err.auth" };
+  if (!UUID_PATTERN.test(categoryId)) return { ok: false, error: "err.generic" };
 
-  const { error } = await supabase
+  const { data: source, error: sourceError } = await supabase
     .from("categories")
-    .delete()
+    .select("id, user_id, slug, name_key, is_system")
     .eq("id", categoryId)
-    .eq("user_id", user.id)
     .eq("type", "income")
-    .eq("is_system", false);
-  if (error) return { ok: false, error: "err.generic" };
+    .maybeSingle();
+  if (sourceError) return { ok: false, error: "err.generic" };
+  if (!source || (source.user_id !== null && source.user_id !== user.id)) {
+    return { ok: false, error: "transactions.sourceNotFound" };
+  }
+
+  if (source.user_id === null && (source.slug === "lainnya-in" || source.slug === "lainnya")) {
+    return { ok: false, error: "transactions.sourceFallbackProtected" };
+  }
+
+  const { data: transactions, error: transactionError } = await supabase
+    .from("transactions")
+    .select("type, amount, category_id, funding_source_id")
+    .eq("user_id", user.id);
+  if (transactionError) return { ok: false, error: "err.generic" };
+
+  const balance = computeSourceBalances(
+    (transactions ?? []) as {
+      type: string;
+      amount: number;
+      category_id: string | null;
+      funding_source_id: string | null;
+    }[],
+    [source]
+  ).get(source.id);
+  if ((balance ?? 0) !== 0) {
+    return { ok: false, error: "transactions.sourceHasBalance" };
+  }
+
+  // Jadwal berulang menyimpan id sumber, bukan namanya. Menghapus sumber yang
+  // masih dipakai akan membuat transaksi berikutnya tidak punya sumber atau
+  // masuk ke sumber yang sudah tidak terlihat.
+  const { count: recurringCount, error: recurringError } = await supabase
+    .from("recurring_transactions")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", user.id)
+    .or(`category_id.eq.${categoryId},funding_source_id.eq.${categoryId}`);
+  if (recurringError) return { ok: false, error: "err.generic" };
+  if ((recurringCount ?? 0) > 0) {
+    return { ok: false, error: "transactions.sourceUsedByRecurring" };
+  }
+
+  if (source.user_id === user.id) {
+    const { error } = await supabase
+      .from("categories")
+      .delete()
+      .eq("id", categoryId)
+      .eq("user_id", user.id)
+      .eq("type", "income")
+      .eq("is_system", false);
+    if (error) return { ok: false, error: "err.generic" };
+  } else {
+    const { data: existing, error: existingError } = await supabase
+      .from("category_overrides")
+      .select("custom_name")
+      .eq("user_id", user.id)
+      .eq("category_id", categoryId)
+      .maybeSingle();
+    if (existingError) return { ok: false, error: "err.generic" };
+
+    const { error } = await supabase.from("category_overrides").upsert(
+      {
+        user_id: user.id,
+        category_id: categoryId,
+        custom_name: existing?.custom_name ?? null,
+        hidden: true,
+      },
+      { onConflict: "user_id,category_id" }
+    );
+    if (error) return { ok: false, error: "err.generic" };
+  }
 
   revalidatePath(`/${locale}/dashboard`);
   revalidatePath(`/${locale}/transactions`);

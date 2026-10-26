@@ -4,7 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useSyncExternalStore,
 } from "react";
 
@@ -47,15 +47,13 @@ const ThemeContext = createContext<ThemeContextValue>({
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // Server + first hydration render both resolve to "dark" (the value baked
   // into <html>), so there is no hydration mismatch. The stored preference is
-  // read after hydration via the client snapshot. An inline script in the
-  // layout applies the stored class before paint to avoid a flash.
+  // read after hydration via the client snapshot.
   const theme = useSyncExternalStore(subscribe, readStoredTheme, getServerTheme);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = document.documentElement;
     root.classList.toggle("light", theme === "light");
     root.classList.toggle("dark", theme === "dark");
-    window.localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
 
   const toggle = useCallback(() => {
