@@ -316,6 +316,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [summaryMonth, setSummaryMonth] = useState(todayISO().slice(0, 7));
   const [recurringFormOpen, setRecurringFormOpen] = useState(false);
+  const [recurringSectionOpen, setRecurringSectionOpen] = useState(false);
+  const [isLargeScreen, setIsLargeScreen] = useState(false);
   const [editingRecurringId, setEditingRecurringId] = useState("");
   const [recurringType, setRecurringType] = useState<"income" | "expense">("expense");
   const [recurringFrequency, setRecurringFrequency] = useState<"weekly" | "monthly">("monthly");
@@ -326,6 +328,14 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [recurringIntervalCount, setRecurringIntervalCount] = useState(1);
   const [editVaultId, setEditVaultId] = useState("");
   const [editFundingSourceId, setEditFundingSourceId] = useState("");
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 1024px)");
+    const updateScreenSize = () => setIsLargeScreen(mediaQuery.matches);
+    updateScreenSize();
+    mediaQuery.addEventListener("change", updateScreenSize);
+    return () => mediaQuery.removeEventListener("change", updateScreenSize);
+  }, []);
 
   /**
    * Nama kategori dan vault, diseragamkan dengan halaman Alokasi/Anggaran
@@ -785,6 +795,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setRecurringAllocationMode(template.vault_id ? "single" : "auto");
     setRecurringIntervalCount(template.interval_count);
     setRecurringFormOpen(true);
+    setRecurringSectionOpen(true);
   }
 
   function transactionError(
@@ -1312,17 +1323,29 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       {section === "dashboard" && <CashflowChart transactions={transactions} />}
       {section === "transactions" && (
         <Card>
-          <CardContent className="p-5">
+          <CardContent className={`p-5 ${recurringSectionOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex items-center gap-3">
+              <button
+                type="button"
+                aria-expanded={isLargeScreen || recurringSectionOpen}
+                onClick={() => {
+                  if (!isLargeScreen) setRecurringSectionOpen((open) => !open);
+                }}
+                className="flex min-w-0 flex-1 items-start gap-3 text-left lg:cursor-default"
+              >
                 <span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent">
                   <CalendarClock size={18} />
                 </span>
-                <div>
+                <span className="min-w-0 flex-1">
                   <h2 className="font-display text-lg font-semibold text-ink">{txText("recurringTitle")}</h2>
-                  <p className="mt-1 max-w-2xl text-sm text-muted">{txText("recurringDescription")}</p>
-                </div>
-              </div>
+                  <span className={`mt-1 max-w-2xl text-sm text-muted ${recurringSectionOpen ? "block" : "hidden"} lg:block`}>{txText("recurringDescription")}</span>
+                </span>
+                <ChevronDown
+                  size={18}
+                  aria-hidden="true"
+                  className={`mt-1 shrink-0 text-muted transition-transform lg:hidden ${recurringSectionOpen ? "rotate-180" : ""}`}
+                />
+              </button>
               <Button
                 type="button"
                 variant="outline"
@@ -1340,13 +1363,17 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     setRecurringAllocationMode("auto");
                     setRecurringIntervalCount(1);
                     setRecurringFormOpen(true);
+                    setRecurringSectionOpen(true);
                   }
                 }}
               >
                 <Plus size={16} />{txText("recurringCreate")}
               </Button>
             </div>
+          </CardContent>
 
+          <div className={`${recurringSectionOpen ? "block" : "hidden"} lg:block`}>
+          <CardContent className="p-5 pt-0">
             {recurringFormOpen && (
               <form key={editingRecurringId || "new-recurring"} onSubmit={submitRecurringTemplate} className="mt-5 grid gap-3 rounded-2xl border border-line bg-surface2/40 p-4 sm:grid-cols-2 lg:grid-cols-3">
                 <Field label={txText("recurringName")}>
@@ -1600,6 +1627,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               )}
             </div>
           </CardContent>
+          </div>
         </Card>
       )}
       {section === "dashboard" && (

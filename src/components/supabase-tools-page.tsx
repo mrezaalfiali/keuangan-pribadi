@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter } from "@/src/i18n/navigation";
-import { Calculator, Download, Flame, LockKeyhole, LockKeyholeOpen, Plus, Sparkles, Target, Trash2, Trophy, Upload, UserRound, Wallet } from "lucide-react";
+import { Calculator, ChevronDown, Download, Flame, LockKeyhole, LockKeyholeOpen, Plus, Sparkles, Target, Trash2, Trophy, Upload, UserRound, Wallet } from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { SocialLinks } from "@/src/components/social-links";
@@ -107,8 +107,20 @@ export function SupabaseToolsPage({ section }: Props) {
   const [budgetScope, setBudgetScope] = useState<BudgetScope>("category");
   const [budgetScopeId, setBudgetScopeId] = useState("");
   const [budgetNotice, setBudgetNotice] = useState("");
+  const [ruleFormOpen, setRuleFormOpen] = useState(false);
+  const [vaultFormOpen, setVaultFormOpen] = useState(false);
+  const [budgetFormOpen, setBudgetFormOpen] = useState(false);
+  const [isLargeScreen, setIsLargeScreen] = useState(false);
   const [resetPhrase, setResetPhrase] = useState("");
   const [resetting, setResetting] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 1024px)");
+    const updateScreenSize = () => setIsLargeScreen(mediaQuery.matches);
+    updateScreenSize();
+    mediaQuery.addEventListener("change", updateScreenSize);
+    return () => mediaQuery.removeEventListener("change", updateScreenSize);
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -511,7 +523,34 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       {notice && <p role="status" className="rounded-xl border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{notice}</p>}
       {loading ? <Card><CardContent className="p-8 text-center text-sm text-muted">{common("loading")}</CardContent></Card> : <>
         {section === "vaults" && <section className="grid items-start gap-5 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-          <Card><CardContent className="p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("createTitle")}</h2><form onSubmit={submitVault} className="mt-5 flex flex-col gap-4"><Field label={t("name")}><Input name="name" maxLength={48} required /></Field><Field label={t("targetAmount")}><Input name="target" type="number" min="0" step="1" defaultValue="0" /></Field><Button type="submit" disabled={saving}><Plus size={16} />{common("add")}</Button></form></CardContent></Card>
+          <Card>
+            <div className={`p-5 ${vaultFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+              <h2 className="font-display text-lg font-semibold text-ink">
+                <button
+                  type="button"
+                  aria-expanded={isLargeScreen || vaultFormOpen}
+                  onClick={() => {
+                    if (!isLargeScreen) setVaultFormOpen((open) => !open);
+                  }}
+                  className="flex w-full items-center justify-between gap-3 text-left lg:cursor-default"
+                >
+                  {t("createTitle")}
+                  <ChevronDown
+                    size={18}
+                    aria-hidden="true"
+                    className={`shrink-0 text-muted transition-transform lg:hidden ${vaultFormOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+              </h2>
+            </div>
+            <div className={`border-t border-line p-5 ${vaultFormOpen ? "block" : "hidden"} lg:block lg:border-t-0 lg:pt-0`}>
+              <form onSubmit={submitVault} className="flex flex-col gap-4">
+                <Field label={t("name")}><Input name="name" maxLength={48} required /></Field>
+                <Field label={t("targetAmount")}><Input name="target" type="number" min="0" step="1" defaultValue="0" /></Field>
+                <Button type="submit" disabled={saving}><Plus size={16} />{common("add")}</Button>
+              </form>
+            </div>
+          </Card>
           <div className="space-y-3">{vaults.length === 0 ? <Empty text={local("emptyVaults")} /> : vaults.map((vault) => {
             const balance = vaultBalances.get(vault.id) ?? 0;
             const target = vault.target_amount ?? 0;
@@ -520,11 +559,36 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
         </section>}
 
         {section === "budgets" && <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-          <Card><CardContent className="p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("createTitle")}</h2><p className="mt-2 text-sm text-muted">{t("subtitle")}</p><form onSubmit={submitBudget} className="mt-5 flex flex-col gap-4"><Field label={t("scope")}><select name="scope" value={budgetScope} onChange={(event) => { setBudgetScope(event.target.value as BudgetScope); setBudgetScopeId(""); }} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"><option value="category">{t("scopeCategory")}</option><option value="vault">{t("scopeVault")}</option></select></Field><Field label={budgetScope === "vault" ? t("vault") : t("category")}><select name="scopeId" value={budgetScopeId} onChange={(event) => setBudgetScopeId(event.target.value)} required className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"><option value="">{common("none")}</option>{(budgetScope === "vault" ? vaults : expenseCategories).map((item) => <option key={item.id} value={item.id}>{scopeOptionLabel(item)}</option>)}</select></Field>
+          <Card>
+            <div className={`p-5 ${budgetFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+              <h2 className="font-display text-lg font-semibold text-ink">
+                <button
+                  type="button"
+                  aria-expanded={isLargeScreen || budgetFormOpen}
+                  onClick={() => {
+                    if (!isLargeScreen) setBudgetFormOpen((open) => !open);
+                  }}
+                  className="flex w-full items-center justify-between gap-3 text-left lg:cursor-default"
+                >
+                  {t("createTitle")}
+                  <ChevronDown
+                    size={18}
+                    aria-hidden="true"
+                    className={`shrink-0 text-muted transition-transform lg:hidden ${budgetFormOpen ? "rotate-180" : ""}`}
+                  />
+                </button>
+              </h2>
+              <p className="mt-2 text-sm text-muted">{t("subtitle")}</p>
+            </div>
+            <div className={`border-t border-line p-5 ${budgetFormOpen ? "block" : "hidden"} lg:block lg:border-t-0 lg:pt-0`}>
+              <form onSubmit={submitBudget} className="flex flex-col gap-4"><Field label={t("scope")}><select name="scope" value={budgetScope} onChange={(event) => { setBudgetScope(event.target.value as BudgetScope); setBudgetScopeId(""); }} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"><option value="category">{t("scopeCategory")}</option><option value="vault">{t("scopeVault")}</option></select></Field><Field label={budgetScope === "vault" ? t("vault") : t("category")}><select name="scopeId" value={budgetScopeId} onChange={(event) => setBudgetScopeId(event.target.value)} required className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"><option value="">{common("none")}</option>{(budgetScope === "vault" ? vaults : expenseCategories).map((item) => <option key={item.id} value={item.id}>{scopeOptionLabel(item)}</option>)}</select></Field>
             <div className="grid gap-3 sm:grid-cols-2"><Field label={t("periodStart")}><Input key={`start-${budgetScopeId}`} name="startsOn" type="date" defaultValue={defaultPeriod().startsOn} required /></Field><Field label={t("periodEnd")}><Input key={`end-${budgetScopeId}`} name="endsOn" type="date" defaultValue={defaultPeriod().endsOn} required /></Field></div>
             <p className="-mt-2 text-xs text-muted">{t("periodHint")}</p>
             <p className="-mt-2 text-xs text-faint">{t("periodWillBe", { month: paydayLabel(defaultPeriod(), locale) })}</p>
-            <Field label={t("limit")}><Input name="limit" type="number" min="1" step="1" required /></Field><Button type="submit" disabled={saving}>{common("save")}</Button></form>{budgetNotice && <p className="mt-3 text-xs text-accent">{budgetNotice}</p>}</CardContent></Card>
+            <Field label={t("limit")}><Input name="limit" type="number" min="1" step="1" required /></Field><Button type="submit" disabled={saving}>{common("save")}</Button></form>
+            </div>
+            {budgetNotice && <p className="px-5 pb-5 text-xs text-accent">{budgetNotice}</p>}
+          </Card>
           <div className="space-y-5">
             <Card><CardContent className="p-5"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Target size={18} /></span><div><h2 className="font-display text-lg font-semibold text-ink">{t("title")}</h2><p className="text-xs text-muted">{t("activePeriods")}</p></div></div>{activeBudgets.length === 0 ? <p className="mt-6 text-sm text-muted">{t("noActive")}</p> : <ul className="mt-4 divide-y divide-line">{activeBudgets.map((row) => {
             const { budget, spent } = row;
@@ -567,7 +631,31 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
         </section>}
 
         {section === "allocation" && <section className="space-y-5">
-          <Card><CardContent className="p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("newRule")}</h2><p className="mt-2 text-sm text-muted">{t("subtitle")}</p>{vaults.length === 0 ? <p className="mt-4 text-sm text-muted">{local("createVaultFirst")}</p> : <form onSubmit={submitRule} className="mt-5 flex flex-col gap-4">
+          <Card>
+            <div className={`p-5 ${ruleFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+              <div>
+                <h2 className="font-display text-lg font-semibold text-ink">
+                  <button
+                    type="button"
+                    aria-expanded={isLargeScreen || ruleFormOpen}
+                    onClick={() => {
+                      if (!isLargeScreen) setRuleFormOpen((open) => !open);
+                    }}
+                    className="flex w-full items-center justify-between gap-3 text-left lg:cursor-default"
+                  >
+                    {t("newRule")}
+                    <ChevronDown
+                      size={18}
+                      aria-hidden="true"
+                      className={`shrink-0 text-muted transition-transform lg:hidden ${ruleFormOpen ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                </h2>
+                <p className="mt-2 text-sm text-muted">{t("subtitle")}</p>
+              </div>
+            </div>
+            <div className={`border-t border-line p-5 ${ruleFormOpen ? "block" : "hidden"} lg:block lg:border-t-0 lg:pt-0`}>
+              {vaults.length === 0 ? <p className="text-sm text-muted">{local("createVaultFirst")}</p> : <form onSubmit={submitRule} className="flex flex-col gap-4">
             <Field label={t("ruleName")}><Input name="name" value={ruleName} onChange={(event) => setRuleName(event.target.value)} maxLength={64} /></Field>
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between"><span className="text-xs font-medium text-muted">{t("slots")}</span><button type="button" onClick={addSlot} className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-accent hover:bg-accent/10"><Plus size={14} />{t("slotAdd")}</button></div>
@@ -586,7 +674,9 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               <p className="text-xs text-faint">{t("totalPercent")}: {draftPercent}%{draftValid.ok ? "" : ` · ${t(draftValid.error)}`}</p>
             </div>
             <Button type="submit" disabled={saving || !draftValid.ok}><Plus size={16} />{t("newRule")}</Button>
-          </form>}</CardContent></Card>
+              </form>}
+            </div>
+          </Card>
           <Card><CardContent className="p-5"><h2 className="font-display text-lg font-semibold text-ink">{t("previewTitle")}</h2><p className="mt-1 text-sm text-muted">{local("thisMonthIncome")}: {money(monthIncome, locale)}</p>{rules.length === 0 ? <p className="mt-6 text-sm text-muted">{t("noRules")}</p> : <ul className="mt-4 divide-y divide-line">{rules.map((rule) => {
             const shares = previewAllocation(monthIncome, rule.slots);
             return <li key={rule.id} className="flex items-start gap-4 py-3"><div className="min-w-0 flex-1"><p className="font-medium text-ink">{rule.name || t("title")}</p>{shares.map((share) => <p key={share.slot.id ?? share.slot.vault_id} className="text-xs text-muted">{share.slot.vault?.id
