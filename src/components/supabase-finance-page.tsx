@@ -1351,7 +1351,6 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 </span>
                 <span className="min-w-0 flex-1">
                   <h2 className="font-display text-lg font-semibold text-ink">{txText("recurringTitle")}</h2>
-                  <span className={`mt-1 max-w-2xl text-sm text-muted ${recurringSectionOpen ? "block" : "hidden"} lg:block`}>{txText("recurringDescription")}</span>
                 </span>
                 <ChevronDown
                   size={18}
@@ -1383,6 +1382,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 <Plus size={16} />{txText("recurringCreate")}
               </Button>
             </div>
+            <span className={`mt-3 text-sm text-muted ${recurringSectionOpen ? "block" : "hidden"} lg:block`}>{txText("recurringDescription")}</span>
           </CardContent>
 
           <div className={`${recurringSectionOpen ? "block" : "hidden"} lg:block`}>
