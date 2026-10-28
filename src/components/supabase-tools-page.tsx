@@ -524,7 +524,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       {loading ? <Card><CardContent className="p-8 text-center text-sm text-muted">{common("loading")}</CardContent></Card> : <>
         {section === "vaults" && <section className="grid items-start gap-5 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <Card>
-            <div className={`p-5 ${vaultFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+            <div className={`p-5 ${vaultFormOpen ? "pb-4" : "pb-5"} lg:pb-0`}>
               <h2 className="font-display text-lg font-semibold text-ink">
                 <button
                   type="button"
@@ -560,7 +560,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
 
         {section === "budgets" && <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
           <Card>
-            <div className={`p-5 ${budgetFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+            <div className={`p-5 ${budgetFormOpen ? "pb-4" : "pb-5"} lg:pb-0`}>
               <h2 className="font-display text-lg font-semibold text-ink">
                 <button
                   type="button"
@@ -632,7 +632,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
 
         {section === "allocation" && <section className="space-y-5">
           <Card>
-            <div className={`p-5 ${ruleFormOpen ? "pb-0" : "pb-5"} lg:pb-0`}>
+            <div className={`p-5 ${ruleFormOpen ? "pb-4" : "pb-5"} lg:pb-0`}>
               <div>
                 <h2 className="font-display text-lg font-semibold text-ink">
                   <button
