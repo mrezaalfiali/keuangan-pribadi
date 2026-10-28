@@ -1926,7 +1926,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               )}
             </div>
             {section === "transactions" && (
-              <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-2 sm:p-3 w-full max-w-full shrink-0">
+              <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-2 pb-4 sm:p-3 sm:pb-3 w-full max-w-full shrink-0">
                 <Field label={txText("filterSearch")}>
                   <Input
                     value={filterSearch}
@@ -1956,12 +1956,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   >
                     {txText("filterExpense")}
                   </button>
-                  <div className="ml-auto flex items-center gap-1">
+                  <div className="ml-auto flex flex-wrap items-center gap-1 mb-2 sm:mb-0">
                     <select
                       value={sortOrder}
                       onChange={(event) => setSortOrder(event.target.value as "date_desc" | "amount_desc" | "amount_asc")}
                       aria-label={txText("filterSort")}
-                      className="h-8 rounded-lg border border-line bg-bg1 px-2 text-xs text-ink"
+                      className="h-8 rounded-lg border border-line bg-bg1 px-2 text-xs text-ink mb-1 sm:mb-0"
                     >
                       <option value="date_desc">{txText("sortDateDesc")}</option>
                       <option value="amount_desc">{txText("sortAmountDesc")}</option>
@@ -1997,7 +1997,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   )}
                 </div>
                 {filtersExpanded && (
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-1 sm:mb-0">
                   <Field label={txText("filterMonth")}>
                     <select
                       value={filterMonth}
