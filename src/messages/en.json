@@ -216,8 +216,8 @@
     "filterNoneMatch": "No transactions match these filters.",
     "filterCount": "{count} transactions",
     "monthNet": "Net",
-      "fundedBy": "from",
-      "details": "Details",
+    "fundedBy": "from",
+    "details": "Details",
     "addSource": "Add Source",
     "deleteSource": "Delete source",
     "deleteSourceConfirm": "Delete this source? Only sources with a 0 balance can be deleted. Past transactions are kept.",
@@ -265,7 +265,17 @@
     "recurringNameError": "Schedule name is required (maximum 80 characters).",
     "recurringScheduleError": "Check the schedule date and frequency.",
     "recurringDetailsError": "The category, funding source, or vault is invalid. Review your selections.",
-    "recurringStaleError": "This schedule has changed. Reload the page and review it again."
+    "recurringStaleError": "This schedule has changed. Reload the page and review it again.",
+    "filterSort": "Sort by",
+    "sortDateDesc": "Newest → Oldest",
+    "sortAmountDesc": "Amount: high → low",
+    "sortAmountAsc": "Amount: low → high",
+    "topExpensesTitle": "Top expenses",
+    "lowestExpensesTitle": "Lowest expenses",
+    "topExpensesDesc": "Based on filtered expense transactions",
+    "topExpensesViewHighest": "Highest",
+    "topExpensesViewLowest": "Lowest",
+    "noExpenseInFilter": "No expenses for these filters"
   },
   "allocation": {
     "title": "Allocation",
@@ -337,7 +347,7 @@
     "warning": "Almost full",
     "full": "Full",
     "exceeded": "Exceeded",
-"removed": "Budget removed.",
+    "removed": "Budget removed.",
     "notSpent": "Nothing spent this month.",
     "scopeCategory": "Category",
     "scopeVault": "Vault",
@@ -546,18 +556,54 @@
     "tax": "Taxes"
   },
   "ach": {
-    "firstTx": { "name": "First Step", "desc": "Record your first transaction." },
-    "streak3": { "name": "Consistent", "desc": "3-day logging streak." },
-    "streak7": { "name": "Full Week", "desc": "7-day logging streak." },
-    "streak30": { "name": "Monthly Streak", "desc": "30-day logging streak." },
-    "tx50": { "name": "Keen Recorder", "desc": "Record 50 transactions." },
-    "tx500": { "name": "Ledger Maestro", "desc": "Record 500 transactions." },
-    "vaultDaratTarget": { "name": "Emergency Fortress", "desc": "Emergency fund reaches 90% of target." },
-    "vaultTabunganTarget": { "name": "Savings Mountain", "desc": "Savings reach 90% of target." },
-    "safeDarat1m": { "name": "Untouched I", "desc": "1 month without touching the emergency fund." },
-    "safeDarat3m": { "name": "Untouched II", "desc": "3 months without touching the emergency fund." },
-    "safeDarat6m": { "name": "Untouched III", "desc": "6 months without touching the emergency fund." },
-    "ratio20": { "name": "Healthy Ratio", "desc": "Savings/expense ratio ≥ 20% for a month." }
+    "firstTx": {
+      "name": "First Step",
+      "desc": "Record your first transaction."
+    },
+    "streak3": {
+      "name": "Consistent",
+      "desc": "3-day logging streak."
+    },
+    "streak7": {
+      "name": "Full Week",
+      "desc": "7-day logging streak."
+    },
+    "streak30": {
+      "name": "Monthly Streak",
+      "desc": "30-day logging streak."
+    },
+    "tx50": {
+      "name": "Keen Recorder",
+      "desc": "Record 50 transactions."
+    },
+    "tx500": {
+      "name": "Ledger Maestro",
+      "desc": "Record 500 transactions."
+    },
+    "vaultDaratTarget": {
+      "name": "Emergency Fortress",
+      "desc": "Emergency fund reaches 90% of target."
+    },
+    "vaultTabunganTarget": {
+      "name": "Savings Mountain",
+      "desc": "Savings reach 90% of target."
+    },
+    "safeDarat1m": {
+      "name": "Untouched I",
+      "desc": "1 month without touching the emergency fund."
+    },
+    "safeDarat3m": {
+      "name": "Untouched II",
+      "desc": "3 months without touching the emergency fund."
+    },
+    "safeDarat6m": {
+      "name": "Untouched III",
+      "desc": "6 months without touching the emergency fund."
+    },
+    "ratio20": {
+      "name": "Healthy Ratio",
+      "desc": "Savings/expense ratio ≥ 20% for a month."
+    }
   },
   "points": {
     "earned": "+{amount} points",

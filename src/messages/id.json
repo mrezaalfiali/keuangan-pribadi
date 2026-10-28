@@ -216,8 +216,8 @@
     "filterNoneMatch": "Tidak ada transaksi yang cocok dengan filter ini.",
     "filterCount": "{count} transaksi",
     "monthNet": "Selisih",
-      "fundedBy": "dari",
-      "details": "Detail",
+    "fundedBy": "dari",
+    "details": "Detail",
     "addSource": "Tambah Sumber",
     "deleteSource": "Hapus sumber",
     "deleteSourceConfirm": "Hapus sumber ini? Hanya sumber dengan saldo 0 yang bisa dihapus. Riwayat transaksi lama tetap tersimpan.",
@@ -265,7 +265,17 @@
     "recurringNameError": "Nama jadwal wajib diisi (maksimal 80 karakter).",
     "recurringScheduleError": "Periksa tanggal dan frekuensi jadwal.",
     "recurringDetailsError": "Kategori, sumber dana, atau vault tidak valid. Periksa pilihan Anda.",
-    "recurringStaleError": "Jadwal ini sudah berubah. Muat ulang halaman dan periksa kembali."
+    "recurringStaleError": "Jadwal ini sudah berubah. Muat ulang halaman dan periksa kembali.",
+    "filterSort": "Urutkan",
+    "sortDateDesc": "Terbaru → Terlama",
+    "sortAmountDesc": "Nominal terbesar → terkecil",
+    "sortAmountAsc": "Nominal terkecil → terbesar",
+    "topExpensesTitle": "Pengeluaran tertinggi",
+    "lowestExpensesTitle": "Pengeluaran terendah",
+    "topExpensesDesc": "Berdasarkan transaksi pengeluaran yang difilter",
+    "topExpensesViewHighest": "Tertinggi",
+    "topExpensesViewLowest": "Terendah",
+    "noExpenseInFilter": "Belum ada pengeluaran untuk filter ini"
   },
   "allocation": {
     "title": "Alokasi Dana",
@@ -546,18 +556,54 @@
     "tax": "Pajak"
   },
   "ach": {
-    "firstTx": { "name": "Langkah Pertama", "desc": "Catat transaksi pertama." },
-    "streak3": { "name": "Konsisten", "desc": "Streak mencatat 3 hari beruntun." },
-    "streak7": { "name": "Seminggu Penuh", "desc": "Streak 7 hari beruntun." },
-    "streak30": { "name": "Selebit Bulan", "desc": "Streak 30 hari beruntun." },
-    "tx50": { "name": "Pencatat Cekatan", "desc": "Catat 50 transaksi." },
-    "tx500": { "name": "Maestro Neraca", "desc": "Catat 500 transaksi." },
-    "vaultDaratTarget": { "name": "Benteng Darurat", "desc": "Dana darurat mencapai 90% target." },
-    "vaultTabunganTarget": { "name": "Gunung Tabungan", "desc": "Tabungan mencapai 90% target." },
-    "safeDarat1m": { "name": "Darurat Utuh I", "desc": "1 bulan tanpa menyentuh dana darurat." },
-    "safeDarat3m": { "name": "Darurat Utuh II", "desc": "3 bulan tanpa menyentuh dana darurat." },
-    "safeDarat6m": { "name": "Darurat Utuh III", "desc": "6 bulan tanpa menyentuh dana darurat." },
-    "ratio20": { "name": "Rasio Sehat", "desc": "Rasio tabungan/pengeluaran ≥ 20% selama sebulan." }
+    "firstTx": {
+      "name": "Langkah Pertama",
+      "desc": "Catat transaksi pertama."
+    },
+    "streak3": {
+      "name": "Konsisten",
+      "desc": "Streak mencatat 3 hari beruntun."
+    },
+    "streak7": {
+      "name": "Seminggu Penuh",
+      "desc": "Streak 7 hari beruntun."
+    },
+    "streak30": {
+      "name": "Selebit Bulan",
+      "desc": "Streak 30 hari beruntun."
+    },
+    "tx50": {
+      "name": "Pencatat Cekatan",
+      "desc": "Catat 50 transaksi."
+    },
+    "tx500": {
+      "name": "Maestro Neraca",
+      "desc": "Catat 500 transaksi."
+    },
+    "vaultDaratTarget": {
+      "name": "Benteng Darurat",
+      "desc": "Dana darurat mencapai 90% target."
+    },
+    "vaultTabunganTarget": {
+      "name": "Gunung Tabungan",
+      "desc": "Tabungan mencapai 90% target."
+    },
+    "safeDarat1m": {
+      "name": "Darurat Utuh I",
+      "desc": "1 bulan tanpa menyentuh dana darurat."
+    },
+    "safeDarat3m": {
+      "name": "Darurat Utuh II",
+      "desc": "3 bulan tanpa menyentuh dana darurat."
+    },
+    "safeDarat6m": {
+      "name": "Darurat Utuh III",
+      "desc": "6 bulan tanpa menyentuh dana darurat."
+    },
+    "ratio20": {
+      "name": "Rasio Sehat",
+      "desc": "Rasio tabungan/pengeluaran ≥ 20% selama sebulan."
+    }
   },
   "points": {
     "earned": "+{amount} poin",
@@ -579,76 +625,76 @@
     "reached": "Sudah tercapai",
     "unreachable": "Tidak akan tercapai tanpa setoran",
     "loan": {
-        "title": "Angsuran Kredit",
-        "description": "Perkiraan angsuran bulanan dari pokok, bunga, dan tenor.",
-        "principal": "Pokok pinjaman (Rp)",
-        "rate": "Bunga per tahun (%)",
-        "months": "Tenor (bulan)",
-        "method": "Metode bunga",
-        "method_flat": "Flat",
-        "method_effective": "Efektif",
-        "hint_flat": "Bunga flat dihitung dari pokok awal, sehingga angsuran tetap sama tiap bulan.",
-        "hint_effective": "Bunga efektif dihitung dari sisa pokok, sehingga angsuran turun setiap bulan dan total bunga lebih kecil.",
-        "monthlyPayment": "Angsuran per bulan",
-        "totalInterest": "Total bunga",
-        "totalPayment": "Total bayar",
-        "needInput": "Isi pokok dan tenor untuk melihat hasil."
-      },
-      "emergency": {
-        "title": "Dana Darurat",
-        "description": "Target dana darurat dari pengeluaran bulanan dan berapa lama untuk menghimpunnya.",
-        "expense": "Pengeluaran bulanan (Rp)",
-        "multiplier": "Target dalam bulan pengeluaran",
-        "monthsOfExpense": "{count} bulan",
-        "saved": "Sudah tersimpan (Rp)",
-        "contribution": "Setoran bulanan (Rp)",
-        "target": "Target dana darurat",
-        "remaining": "Sisa yang perlu dihimpun",
-        "time": "Perkiraan waktu",
-        "needInput": "Isi pengeluaran bulanan untuk melihat hasil."
-      },
-      "goal": {
-        "title": "Target Tabungan",
-        "description": "Berapa lama saldo tabungan mencapai target dengan setoran tetap.",
-        "current": "Saldo saat ini (Rp)",
-        "target": "Target (Rp)",
-        "contribution": "Setoran bulanan (Rp)",
-        "remaining": "Sisa yang perlu dihimpun",
-        "time": "Perkiraan waktu",
-        "needInput": "Isi target untuk melihat hasil."
-      },
-      "salary": {
-        "title": "Alokasi Gaji",
-        "description": "Hitung pembagian gaji berdasarkan persentase agar kebutuhan, keinginan, tabungan, dan tujuan finansial jelas terukur.",
-        "income": "Gaji bulanan (Rp)",
-        "preview": "Rp",
-        "summary": "Ringkasan",
-        "chart": "Grafik alokasi",
-        "totalPercent": "Total persentase",
-        "remaining": "Sisa pendapatan",
-        "needInput": "Masukkan gaji untuk melihat hasil alokasi.",
-        "addCategory": "Tambah kategori",
-        "newCategory": "Kategori baru",
-        "categoryName": "Nama kategori",
-        "percentage": "Persentase",
-        "remove": "Hapus",
-        "whyTitle": "Kenapa harus dialokasikan?",
-        "whyDescription": "Membagi pendapatan membantu kebutuhan tetap tercukupi, pengeluaran tetap terkendali, dana darurat dan tujuan finansial tetap tumbuh, dan gaya hidup tidak membebani masa depan.",
-        "defaults": {
-          "needs": "Kebutuhan",
-          "wants": "Keinginan",
-          "savings": "Tabungan",
-          "goals": "Tujuan finansial"
-        }
-      },
-      "arithmetic": {
-        "title": "Kalkulator Biasa",
-        "description": "Hitung cepat memakai +, -, x, /, persen, dan tanda kurung.",
-        "result": "Hasil",
-        "clear": "C",
-        "back": "Hapus",
-        "invalid": "Ekspresi belum lengkap.",
-        "divideByZero": "Tidak bisa membagi dengan nol."
+      "title": "Angsuran Kredit",
+      "description": "Perkiraan angsuran bulanan dari pokok, bunga, dan tenor.",
+      "principal": "Pokok pinjaman (Rp)",
+      "rate": "Bunga per tahun (%)",
+      "months": "Tenor (bulan)",
+      "method": "Metode bunga",
+      "method_flat": "Flat",
+      "method_effective": "Efektif",
+      "hint_flat": "Bunga flat dihitung dari pokok awal, sehingga angsuran tetap sama tiap bulan.",
+      "hint_effective": "Bunga efektif dihitung dari sisa pokok, sehingga angsuran turun setiap bulan dan total bunga lebih kecil.",
+      "monthlyPayment": "Angsuran per bulan",
+      "totalInterest": "Total bunga",
+      "totalPayment": "Total bayar",
+      "needInput": "Isi pokok dan tenor untuk melihat hasil."
+    },
+    "emergency": {
+      "title": "Dana Darurat",
+      "description": "Target dana darurat dari pengeluaran bulanan dan berapa lama untuk menghimpunnya.",
+      "expense": "Pengeluaran bulanan (Rp)",
+      "multiplier": "Target dalam bulan pengeluaran",
+      "monthsOfExpense": "{count} bulan",
+      "saved": "Sudah tersimpan (Rp)",
+      "contribution": "Setoran bulanan (Rp)",
+      "target": "Target dana darurat",
+      "remaining": "Sisa yang perlu dihimpun",
+      "time": "Perkiraan waktu",
+      "needInput": "Isi pengeluaran bulanan untuk melihat hasil."
+    },
+    "goal": {
+      "title": "Target Tabungan",
+      "description": "Berapa lama saldo tabungan mencapai target dengan setoran tetap.",
+      "current": "Saldo saat ini (Rp)",
+      "target": "Target (Rp)",
+      "contribution": "Setoran bulanan (Rp)",
+      "remaining": "Sisa yang perlu dihimpun",
+      "time": "Perkiraan waktu",
+      "needInput": "Isi target untuk melihat hasil."
+    },
+    "salary": {
+      "title": "Alokasi Gaji",
+      "description": "Hitung pembagian gaji berdasarkan persentase agar kebutuhan, keinginan, tabungan, dan tujuan finansial jelas terukur.",
+      "income": "Gaji bulanan (Rp)",
+      "preview": "Rp",
+      "summary": "Ringkasan",
+      "chart": "Grafik alokasi",
+      "totalPercent": "Total persentase",
+      "remaining": "Sisa pendapatan",
+      "needInput": "Masukkan gaji untuk melihat hasil alokasi.",
+      "addCategory": "Tambah kategori",
+      "newCategory": "Kategori baru",
+      "categoryName": "Nama kategori",
+      "percentage": "Persentase",
+      "remove": "Hapus",
+      "whyTitle": "Kenapa harus dialokasikan?",
+      "whyDescription": "Membagi pendapatan membantu kebutuhan tetap tercukupi, pengeluaran tetap terkendali, dana darurat dan tujuan finansial tetap tumbuh, dan gaya hidup tidak membebani masa depan.",
+      "defaults": {
+        "needs": "Kebutuhan",
+        "wants": "Keinginan",
+        "savings": "Tabungan",
+        "goals": "Tujuan finansial"
       }
+    },
+    "arithmetic": {
+      "title": "Kalkulator Biasa",
+      "description": "Hitung cepat memakai +, -, x, /, persen, dan tanda kurung.",
+      "result": "Hasil",
+      "clear": "C",
+      "back": "Hapus",
+      "invalid": "Ekspresi belum lengkap.",
+      "divideByZero": "Tidak bisa membagi dengan nol."
     }
   }
+}

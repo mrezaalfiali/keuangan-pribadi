@@ -313,6 +313,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [filterFundingSource, setFilterFundingSource] = useState("");
   const [filterVault, setFilterVault] = useState("");
   const [filterSearch, setFilterSearch] = useState("");
+  const [sortOrder, setSortOrder] = useState<"date_desc" | "amount_desc" | "amount_asc">("date_desc");
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [summaryMonth, setSummaryMonth] = useState(todayISO().slice(0, 7));
   const [recurringFormOpen, setRecurringFormOpen] = useState(false);
@@ -574,13 +575,24 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       ].filter(Boolean).join(" ")
   ).filter((tx) => !filterMonth || tx.date.startsWith(filterMonth));
 
+  const sortedTransactions = useMemo(() => {
+    const list = [...filteredTransactions];
+    if (sortOrder === "amount_desc") {
+      return list.sort((a, b) => b.amount - a.amount);
+    }
+    if (sortOrder === "amount_asc") {
+      return list.sort((a, b) => a.amount - b.amount);
+    }
+    return list;
+  }, [filteredTransactions, sortOrder]);
+
   /**
    * `transactions` sudah terurut `date desc` dari query, sehingga tiap grup bulan
    * sudah urut tanpa sort tambahan; grup-nya yang perlu diurutkan.
    */
   const monthGroups: Array<[string, TxRow[]]> = (() => {
     const grouped = new Map<string, TxRow[]>();
-    for (const tx of filteredTransactions) {
+    for (const tx of sortedTransactions) {
       const key = tx.date.slice(0, 7);
       const bucket = grouped.get(key);
       if (bucket) bucket.push(tx);
@@ -612,6 +624,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setFilterFundingSource("");
     setFilterVault("");
     setFilterSearch("");
+    setSortOrder("date_desc");
   }
 
   function budgetExceededText(
@@ -1763,9 +1776,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           </CardContent>
         </Card>
       )}
-      <div className={`grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] ${section === "dashboard" && !addFormOpen ? "" : "items-start"}`}>
-        <Card><CardContent className={`p-5${section === "dashboard" && !addFormOpen ? " flex h-full flex-col" : ""}`}>
-          <div className="flex items-center justify-between gap-2">
+      <div className={`grid grid-cols-1 items-stretch gap-5 lg:h-[calc(100vh-200px)] lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] overflow-x-hidden`}>
+        <Card className="w-full max-w-full h-full"><CardContent className="w-full max-w-full p-4 sm:p-5 h-full flex flex-col min-h-0">
+          <div className="flex items-center justify-between gap-2 shrink-0">
             <h2 className="font-display text-lg font-semibold text-ink">{txText("addTitle")}</h2>
             {section === "dashboard" && addFormOpen && (
               <button
@@ -1777,17 +1790,17 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               </button>
             )}
           </div>
-          {section === "dashboard" && !addFormOpen ? (
-            <button
-              type="button"
-              onClick={() => setAddFormOpen(true)}
-              className="mt-4 flex flex-1 items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-bg1/60 px-4 py-6 text-sm font-medium text-muted transition-colors hover:border-accent/40 hover:text-ink"
-            >
+            {section === "dashboard" && !addFormOpen ? (
+              <button
+                type="button"
+                onClick={() => setAddFormOpen(true)}
+                className="mt-4 flex flex-1 items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-bg1/60 px-4 py-6 text-sm font-medium text-muted transition-colors hover:border-accent/40 hover:text-ink"
+              >
               <Plus size={16} />
               {txText("addTitle")}
             </button>
           ) : (
-            <form onSubmit={submitTransaction} className="mt-5 flex flex-col gap-4">
+            <form onSubmit={submitTransaction} className="mt-5 flex flex-col gap-4 w-full max-w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
             <Field label={txText("type")}>
               <select name="type" value={type} onChange={(event) => {
                 setType(event.target.value as "income" | "expense");
@@ -1897,8 +1910,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             </form>
           )}
         </CardContent></Card>
-          <Card><CardContent className="p-5">
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <Card className="w-full max-w-full h-full overflow-hidden"><CardContent className="w-full max-w-full p-4 sm:p-5 h-full flex flex-col min-h-0 overflow-hidden">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 shrink-0">
               <h2 className="font-display text-lg font-semibold text-ink">
                 {section === "dashboard" ? dashboard("recentTx") : txText("title")}
               </h2>
@@ -1913,7 +1926,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               )}
             </div>
             {section === "transactions" && (
-              <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-3">
+              <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-2 sm:p-3 w-full max-w-full shrink-0">
                 <Field label={txText("filterSearch")}>
                   <Input
                     value={filterSearch}
@@ -1943,24 +1956,36 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   >
                     {txText("filterExpense")}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setFiltersExpanded((expanded) => !expanded)}
-                    aria-expanded={filtersExpanded}
-                    className="ml-auto inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
-                  >
-                    {filtersExpanded ? txText("filterLess") : txText("filterMore")}
-                    {advancedFiltersCount > 0 && (
-                      <span className="rounded-full bg-accent/15 px-1.5 text-accent">
-                        {advancedFiltersCount}
-                      </span>
-                    )}
-                    <ChevronDown
-                      size={14}
-                      aria-hidden="true"
-                      className={`transition-transform ${filtersExpanded ? "rotate-180" : ""}`}
-                    />
-                  </button>
+                  <div className="ml-auto flex items-center gap-1">
+                    <select
+                      value={sortOrder}
+                      onChange={(event) => setSortOrder(event.target.value as "date_desc" | "amount_desc" | "amount_asc")}
+                      aria-label={txText("filterSort")}
+                      className="h-8 rounded-lg border border-line bg-bg1 px-2 text-xs text-ink"
+                    >
+                      <option value="date_desc">{txText("sortDateDesc")}</option>
+                      <option value="amount_desc">{txText("sortAmountDesc")}</option>
+                      <option value="amount_asc">{txText("sortAmountAsc")}</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => setFiltersExpanded((expanded) => !expanded)}
+                      aria-expanded={filtersExpanded}
+                      className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
+                    >
+                      {filtersExpanded ? txText("filterLess") : txText("filterMore")}
+                      {advancedFiltersCount > 0 && (
+                        <span className="rounded-full bg-accent/15 px-1.5 text-accent">
+                          {advancedFiltersCount}
+                        </span>
+                      )}
+                      <ChevronDown
+                        size={14}
+                        aria-hidden="true"
+                        className={`transition-transform ${filtersExpanded ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                  </div>
                   {filtersActive && (
                     <button
                       type="button"
@@ -2072,6 +2097,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 )}
               </div>
             )}
+            <div className="mt-4 min-h-0 flex-1 overflow-y-auto overflow-x-hidden touch-pan-y pr-1">
             {loading ? (
               <p className="py-10 text-center text-sm text-muted">{common("loading")}</p>
             ) : section === "transactions" ? (
@@ -2080,7 +2106,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   {transactions.length === 0 ? txText("empty") : txText("filterNoneMatch")}
                 </p>
               ) : (
-                <div className="mt-4 space-y-6">
+                <div className="space-y-6">
                   {monthGroups.map(([monthKey, monthTxs]) => {
                     const monthIncome = monthTxs
                       .filter((tx) => tx.type === "income")
@@ -2132,12 +2158,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                             const isEditing = editingTransaction?.id === transaction.id;
                             return (
                               <li key={transaction.id} className="py-1">
-                                <div className="flex items-center gap-3 py-2">
+                                <div className="flex items-center gap-2 sm:gap-3 py-2 min-w-0">
                                   <span
                                     className={
                                       incoming
-                                        ? "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"
-                                        : "grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-surface2 text-muted"
+                                        ? "grid h-8 w-8 sm:h-9 sm:w-9 shrink-0 place-items-center rounded-xl bg-accent/10 text-accent"
+                                        : "grid h-8 w-8 sm:h-9 sm:w-9 shrink-0 place-items-center rounded-xl bg-surface2 text-muted"
                                     }
                                   >
                                     {incoming ? <ArrowDownLeft size={17} /> : <ArrowUpRight size={17} />}
@@ -2154,10 +2180,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                   <span
                                     className={
                                       transaction.type === "income"
-                                        ? "num w-32 shrink-0 text-right text-sm font-semibold text-accent"
+                                        ? "num min-w-[5.5rem] sm:w-32 shrink-0 text-right text-xs sm:text-sm font-semibold text-accent"
                                         : transaction.type === "expense"
-                                          ? "num w-32 shrink-0 text-right text-sm font-semibold text-danger"
-                                          : "num w-32 shrink-0 text-right text-sm font-semibold text-ink"
+                                          ? "num min-w-[5.5rem] sm:w-32 shrink-0 text-right text-xs sm:text-sm font-semibold text-danger"
+                                          : "num min-w-[5.5rem] sm:w-32 shrink-0 text-right text-xs sm:text-sm font-semibold text-ink"
                                     }
                                   >
                                     {incoming ? "+" : "−"}
@@ -2168,7 +2194,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                     onClick={() => setExpandedTxId(isExpanded ? null : transaction.id)}
                                     aria-expanded={isExpanded}
                                     aria-label={txText("details")}
-                                    className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                                    className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
                                   >
                                     <ChevronDown size={16} className={`transition-transform ${isExpanded ? "rotate-180" : ""}`} />
                                   </button>
@@ -2178,18 +2204,18 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                       disabled={savingEdit}
                                       onClick={() => { if (isEditing) { setEditingTransaction(null); setEditError(""); return; } setEditError(""); setEditingTransaction(transaction); setEditVaultId(transaction.vault_id ?? ""); setEditFundingSourceId(transaction.funding_source_id ?? ""); }}
                                       aria-label={txText("editTitle")}
-                                      className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                                      className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
                                     >
                                       <Pencil size={16} />
                                     </button>
                                   ) : (
-                                    <span aria-hidden="true" className="h-8 w-8 shrink-0" />
+                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
                                   )}
                                   <button
                                     type="button"
                                     onClick={() => void removeTransaction(transaction.id)}
                                     aria-label={common("delete")}
-                                    className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-danger"
+                                    className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-danger shrink-0"
                                   >
                                     <Trash2 size={16} />
                                   </button>
@@ -2285,9 +2311,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       <Trash2 size={16} />
                     </button>
                   </li>
-                ))}
+                )                )}
               </ul>
             )}
+            </div>
           </CardContent></Card>
       </div>
     </div>
