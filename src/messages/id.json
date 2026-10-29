@@ -139,7 +139,7 @@
   "transactions": {
     "title": "Transaksi",
     "addTitle": "Catat Transaksi",
-    "editTitle": "Ubah Transaksi",
+    "editTitle": "Edit",
     "type": "Jenis",
     "income": "Pemasukan",
     "expense": "Pengeluaran",
@@ -218,6 +218,7 @@
     "monthNet": "Selisih",
     "fundedBy": "dari",
     "details": "Detail",
+    "transactionActions": "Aksi transaksi",
     "addSource": "Tambah Sumber",
     "deleteSource": "Hapus sumber",
     "deleteSourceConfirm": "Hapus sumber ini? Hanya sumber dengan saldo 0 yang bisa dihapus. Riwayat transaksi lama tetap tersimpan.",
@@ -421,6 +422,7 @@
     "nextRankHint": "Kurang {points} poin lagi untuk naik rank.",
     "maxRank": "Rank tertinggi tercapai. Terus catat langkah finansialmu!",
     "achievements": "Achievements",
+    "achievementSummary": "{all} misi · {unlocked} terbuka",
     "unlocked": "Terbuka",
     "locked": "Terkunci",
     "streakTitle": "Streak Kedisiplinan",
@@ -429,7 +431,23 @@
     "logToday": "Catat transaksi hari ini untuk menjaga streak!",
     "allUnlocked": "Semua achievement terbuka. Impressive!",
     "days": "hari",
-    "achievementsEmpty": "Daftar pencapaian belum tersedia."
+    "achievementsEmpty": "Daftar pencapaian belum tersedia.",
+    "filterAll": "Semua",
+    "filterUnlocked": "Terbuka",
+    "filterLocked": "Terkunci",
+    "searchPlaceholder": "Cari achievement...",
+    "syncAchievements": "Periksa Pencapaian",
+    "checkingAchievements": "Memeriksa...",
+    "syncSuccess": "{count} achievement baru terbuka (+{points} poin)!",
+    "syncUpToDate": "Semua achievement sudah mutakhir.",
+    "pointsHistory": "Riwayat Poin",
+    "pointsHistoryCount": "{count} catatan",
+    "pointsHistoryEmpty": "Belum ada riwayat perolehan poin.",
+    "rankTiers": "Daftar Rank & Tingkatan",
+    "rankTiersSubtitle": "Kumpulkan poin dari pencatatan harian dan achievement untuk naik level.",
+    "ptsThreshold": "{points} pts",
+    "progressLabel": "Progres",
+    "unlockedOn": "Dibuka pada {date}"
   },
   "about": {
     "title": "Tentang",
@@ -575,7 +593,7 @@
       "desc": "Streak 7 hari beruntun."
     },
     "streak30": {
-      "name": "Selebit Bulan",
+      "name": "30 Hari Konsisten",
       "desc": "Streak 30 hari beruntun."
     },
     "tx50": {
@@ -608,7 +626,27 @@
     },
     "ratio20": {
       "name": "Rasio Sehat",
-      "desc": "Rasio tabungan/pengeluaran ≥ 20% selama sebulan."
+      "desc": "Simpan setidaknya 20% pemasukan dalam sebulan."
+    },
+    "streak100": {
+      "name": "Centurion Kedisiplinan",
+      "desc": "Streak mencatat 100 hari beruntun."
+    },
+    "tx100": {
+      "name": "Pencatat Tangguh",
+      "desc": "Catat 100 transaksi."
+    },
+    "firstVault": {
+      "name": "Arsitek Finansial",
+      "desc": "Buat vault tabungan pertama."
+    },
+    "firstBudget": {
+      "name": "Pengendali Anggaran",
+      "desc": "Tetapkan batas anggaran pertama."
+    },
+    "firstNote": {
+      "name": "Catatan Cermat",
+      "desc": "Tulis catatan keuangan pribadi pertama."
     }
   },
   "points": {

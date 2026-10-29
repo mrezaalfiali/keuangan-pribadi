@@ -3,7 +3,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { useRouter } from "@/src/i18n/navigation";
-import { Calculator, ChevronDown, Download, Flame, LockKeyhole, LockKeyholeOpen, Plus, Sparkles, Target, Trash2, Trophy, Upload, UserRound, Wallet } from "lucide-react";
+import {
+  Calculator,
+  ChevronDown,
+  Download,
+  Flame,
+  LockKeyhole,
+  LockKeyholeOpen,
+  Plus,
+  Sparkles,
+  Target,
+  Trash2,
+  Trophy,
+  Upload,
+  UserRound,
+  Wallet,
+  Play,
+  ListChecks,
+  PiggyBank,
+  ShieldCheck,
+  Gauge,
+  Landmark,
+  PieChart,
+  FileText,
+  RefreshCw,
+  Search,
+  History,
+  Check,
+} from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { SocialLinks } from "@/src/components/social-links";
@@ -34,9 +61,24 @@ import {
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { resolveLabel, sortByLabel } from "@/src/lib/labels";
 import { vaultBalanceDelta } from "@/src/lib/vault-ledger";
-import { getLevelInfo } from "@/src/lib/levels";
-import { nextStreakReward } from "@/src/lib/gamification";
-import type { AllocMethod, AllocationRule, AllocationSlot, Budget, BudgetScope, Category, GamificationState, Profile, Transaction, Vault } from "@/src/lib/types";
+import { getLevelInfo, LEVELS } from "@/src/lib/levels";
+import { activeStreak, computeAchievementProgress, countAchievementTransactions, nextStreakReward, savingsRate } from "@/src/lib/gamification";
+import { todayJakartaISO } from "@/src/lib/recurring";
+import { syncAchievementsAction } from "@/src/lib/actions/gamification";
+import type {
+  AllocMethod,
+  AllocationRule,
+  AllocationSlot,
+  Budget,
+  BudgetScope,
+  Category,
+  GamificationState,
+  Profile,
+  Transaction,
+  Vault,
+  AchievementCriteria,
+  PointsLogRow,
+} from "@/src/lib/types";
 
 type Props = { section: "allocation" | "vaults" | "budgets" | "rewards" | "about" | "settings" };
 type RuleWithSlots = AllocationRule & { slots: (AllocationSlot & { vault: Vault | null })[] };
@@ -92,6 +134,15 @@ export function SupabaseToolsPage({ section }: Props) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [gamification, setGamification] = useState<GamificationState | null>(null);
   const [achievements, setAchievements] = useState<AchievementRow[]>([]);
+  const [pointsLog, setPointsLog] = useState<PointsLogRow[]>([]);
+  const [notesCount, setNotesCount] = useState<number>(0);
+  const [achievementFilter, setAchievementFilter] = useState<"all" | "unlocked" | "locked">("all");
+  const [achievementSearch, setAchievementSearch] = useState("");
+  const [checkingAchievements, setCheckingAchievements] = useState(false);
+  const [syncNotice, setSyncNotice] = useState<{ text: string; isError?: boolean } | null>(null);
+  const [showAllRanks, setShowAllRanks] = useState(false);
+  const [showAchievements, setShowAchievements] = useState(false);
+  const [showPointsHistory, setShowPointsHistory] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -133,15 +184,17 @@ export function SupabaseToolsPage({ section }: Props) {
       setUserId(user.id);
       setEmail(user.email ?? "");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult] = await Promise.all([
+      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult] = await Promise.all([
         supabase.from("vaults").select("*").eq("user_id", user.id).order("priority"),
         supabase.from("transactions").select("*").eq("user_id", user.id).order("date", { ascending: false }),
         supabase.from("budgets").select("*").eq("user_id", user.id).order("starts_on", { ascending: false }),
         supabase.from("allocation_rules").select("*, slots:allocation_slots(*, vault:vaults(*))").eq("user_id", user.id).order("created_at", { ascending: false }),
         supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
         supabase.from("gamification_state").select("*").eq("user_id", user.id).maybeSingle(),
-        supabase.from("achievements").select("*"),
+        supabase.from("achievements").select("*").order("points_reward", { ascending: true }),
         supabase.from("user_achievements").select("achievement_id,unlocked_at").eq("user_id", user.id),
+        supabase.from("points_log").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20),
+        supabase.from("notes").select("id").eq("user_id", user.id),
       ]);
       const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
@@ -155,6 +208,12 @@ export function SupabaseToolsPage({ section }: Props) {
       setGamification(gameResult.data as GamificationState | null);
       const unlocks = new Map((userAchievementResult.data ?? []).map((item) => [item.achievement_id, item.unlocked_at]));
       setAchievements(((achievementResult.data ?? []) as AchievementRow[]).map((item) => ({ ...item, unlockedAt: unlocks.get(item.id) ?? null })));
+      if (!pointsLogResult.error && pointsLogResult.data) {
+        setPointsLog(pointsLogResult.data as PointsLogRow[]);
+      }
+      if (!notesResult.error && notesResult.data) {
+        setNotesCount(notesResult.data.length);
+      }
     } catch (loadError) {
       logSupabaseError("tools.load", loadError);
       setError(settings("connectionError"));
@@ -162,6 +221,30 @@ export function SupabaseToolsPage({ section }: Props) {
       setLoading(false);
     }
   }, [categoryName, locale, settings]);
+
+  const handleSyncAchievements = async () => {
+    try {
+      setCheckingAchievements(true);
+      setSyncNotice(null);
+      const res = await syncAchievementsAction(locale);
+      if (!res.ok) {
+        setSyncNotice({ text: res.error ?? "Gagal memeriksa achievement", isError: true });
+        return;
+      }
+      if (res.unlocked && res.unlocked.length > 0) {
+        setSyncNotice({
+          text: rewards("syncSuccess", { count: res.unlocked.length, points: res.pointsAdded ?? 0 }),
+        });
+      } else {
+        setSyncNotice({ text: rewards("syncUpToDate") });
+      }
+      await load();
+    } catch {
+      setSyncNotice({ text: rewards("syncUpToDate") });
+    } finally {
+      setCheckingAchievements(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -689,27 +772,98 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
 
         {section === "rewards" && (() => {
           const points = gamification?.points ?? 0;
-          const streak = gamification?.streak_current ?? 0;
+          const rewardsToday = todayJakartaISO();
+          const streak = activeStreak(gamification, rewardsToday);
+          const longestStreak = gamification?.streak_longest ?? streak;
           const level = getLevelInfo(points);
           const nextReward = nextStreakReward(streak);
           const pointsToNextRank =
             level.nextThreshold === null ? null : level.nextThreshold - points;
 
+          const rewardsMonth = rewardsToday.slice(0, 7);
+          const achievementIncome = transactions
+            .filter((tx) => tx.type === "income" && tx.date.startsWith(rewardsMonth))
+            .reduce((sum, tx) => sum + tx.amount, 0);
+          const expenseThisMonth = transactions
+            .filter((tx) => tx.type === "expense" && tx.date.startsWith(rewardsMonth))
+            .reduce((sum, tx) => sum + tx.amount, 0);
+
+          const achievementStats = {
+            transactionCount: countAchievementTransactions(transactions),
+            streak,
+            vaults: vaults.map((v) => ({ id: v.id, slug: v.slug, name: v.name ?? "", target_amount: v.target_amount })),
+            vaultBalances,
+            budgetCount: budgets.length,
+            noteCount: notesCount,
+            savingsRatio: savingsRate(achievementIncome, expenseThisMonth),
+            transactions: transactions.map(({ vault_id, type, transfer_direction, date }) => ({
+              vault_id,
+              type,
+              transfer_direction,
+              date,
+            })),
+            today: rewardsToday,
+          };
+
+          const unlockedCount = achievements.filter((a) => a.unlockedAt).length;
+
+          const filteredAchievements = achievements.filter((achievement) => {
+            if (achievementFilter === "unlocked" && !achievement.unlockedAt) return false;
+            if (achievementFilter === "locked" && achievement.unlockedAt) return false;
+            if (achievementSearch.trim()) {
+              const q = achievementSearch.toLowerCase();
+              const name = messages(achievement.name_key).toLowerCase();
+              const desc = messages(achievement.description_key).toLowerCase();
+              if (!name.includes(q) && !desc.includes(q)) return false;
+            }
+            return true;
+          });
+
           return <section className="space-y-5">
+            {syncNotice && (
+              <div className={`flex items-center justify-between rounded-xl border p-4 text-sm ${
+                syncNotice.isError
+                  ? "border-danger/30 bg-danger/10 text-danger"
+                  : "border-accent/30 bg-accent/10 text-accent"
+              }`}>
+                <span>{syncNotice.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setSyncNotice(null)}
+                  className="text-xs font-semibold hover:underline"
+                >
+                  OK
+                </button>
+              </div>
+            )}
+
             <div className="grid gap-4 sm:grid-cols-3">
               <Metric title={rewards("points")} value={points.toLocaleString(locale === "id" ? "id-ID" : "en-US")} />
               <Metric title={rewards("streakTitle")} value={`${streak} ${rewards("days")}`} />
-              <Metric title={rewards("achievements")} value={`${achievements.filter((achievement) => achievement.unlockedAt).length} / ${achievements.length}`} />
+              <Metric title={rewards("achievements")} value={`${unlockedCount} / ${achievements.length}`} />
             </div>
+
             <div className="grid gap-4 md:grid-cols-2">
               <Card><CardContent className="p-5">
-                <div className="flex items-center gap-3">
-                  <span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2"><Trophy size={18} style={{ color: level.color }} /></span>
-                  <div>
-                    <p className="text-xs text-muted">{rewards("currentRank")}</p>
-                    <h2 className="font-display text-lg font-semibold text-ink">{messages(level.titleKey)}</h2>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2">
+                      <Trophy size={18} style={{ color: level.color }} />
+                    </span>
+                    <div>
+                      <p className="text-xs text-muted">{rewards("currentRank")}</p>
+                      <h2 className="font-display text-lg font-semibold text-ink">{messages(level.titleKey)}</h2>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAllRanks(!showAllRanks)}
+                    className="rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors"
+                  >
+                    {rewards("rankTiers")}
+                  </button>
                 </div>
+
                 {pointsToNextRank === null ? (
                   <p className="mt-4 text-sm text-muted">{rewards("maxRank")}</p>
                 ) : (
@@ -720,18 +874,61 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                     </p>
                   </>
                 )}
-              </CardContent></Card>
-              <Card><CardContent className="p-5">
-                <div className="flex items-center gap-3">
-                  <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent/10 text-accent"><Flame size={18} /></span>
-                  <div>
-                    <p className="text-xs text-muted">{rewards("streakTitle")}</p>
-                    <h2 className="font-display text-lg font-semibold text-ink">
-                      {rewards("nextStreakReward", {
-                        days: nextReward.day - streak,
-                        points: nextReward.bonus,
+
+                {showAllRanks && (
+                  <div className="mt-4 space-y-2 rounded-xl border border-line bg-bg1/60 p-3">
+                    <p className="text-xs font-medium text-muted">{rewards("rankTiersSubtitle")}</p>
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                      {LEVELS.map((lvl, idx) => {
+                        const isCurrent = level.level === idx + 1;
+                        const isPassed = idx + 1 < level.level;
+                        return (
+                          <div
+                            key={lvl.titleKey}
+                            className={`flex items-center justify-between rounded-lg p-2 ${
+                              isCurrent
+                                ? "bg-accent/15 border border-accent/30 font-semibold text-ink"
+                                : isPassed
+                                  ? "border font-medium text-ink"
+                                  : "bg-surface border border-line text-muted"
+                            }`}
+                            style={isPassed ? {
+                              backgroundColor: `${lvl.color}12`,
+                              borderColor: `${lvl.color}40`,
+                            } : undefined}
+                          >
+                            <span className="flex items-center gap-1.5 truncate">
+                              <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: lvl.color }} />
+                              <span className="truncate">{messages(lvl.titleKey)}</span>
+                            </span>
+                            <span className="num shrink-0 text-[10px] text-faint">
+                              {lvl.min.toLocaleString(locale === "id" ? "id-ID" : "en-US")} pts
+                            </span>
+                          </div>
+                        );
                       })}
-                    </h2>
+                    </div>
+                  </div>
+                )}
+              </CardContent></Card>
+
+              <Card><CardContent className="p-5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent/10 text-accent"><Flame size={18} /></span>
+                    <div>
+                      <p className="text-xs text-muted">{rewards("streakTitle")}</p>
+                      <h2 className="font-display text-lg font-semibold text-ink">
+                        {rewards("nextStreakReward", {
+                          days: nextReward.day - streak,
+                          points: nextReward.bonus,
+                        })}
+                      </h2>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] uppercase tracking-wider text-muted">Rekor Streak</span>
+                    <p className="num text-sm font-semibold text-ink">{longestStreak} {rewards("days")}</p>
                   </div>
                 </div>
                 <p className="mt-4 flex items-center gap-2 text-sm text-muted">
@@ -740,7 +937,211 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 </p>
               </CardContent></Card>
             </div>
-            <Card><CardContent className="p-5"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Trophy size={18} /></span><div><h2 className="font-display text-lg font-semibold text-ink">{rewards("achievements")}</h2><p className="text-sm text-muted">{rewards("subtitle")}</p></div></div>{achievements.length === 0 ? <p className="mt-5 text-sm text-muted">{rewards("achievementsEmpty")}</p> : <ul className="mt-4 divide-y divide-line">{achievements.map((achievement) => <li key={achievement.id} className="flex items-center gap-3 py-3"><span className={achievement.unlockedAt ? "grid h-8 w-8 place-items-center rounded-full bg-accent/15 text-accent" : "grid h-8 w-8 place-items-center rounded-full bg-surface2 text-faint"}><Trophy size={15} /></span><span className="min-w-0 flex-1"><span className="block text-sm text-ink">{messages(achievement.name_key)}</span><span className="mt-0.5 block text-xs text-muted">{messages(achievement.description_key)}</span></span><span className="shrink-0 text-right text-xs text-muted"><span className="block">{achievement.unlockedAt ? rewards("unlocked") : rewards("locked")}</span><span className="mt-0.5 block text-accent">+{achievement.points_reward} pts</span></span></li>)}</ul>}</CardContent></Card>
+
+            {/* Achievements Section */}
+            <Card><CardContent className="p-5">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  aria-expanded={showAchievements}
+                  onClick={() => setShowAchievements((open) => !open)}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                >
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-surface2 text-accent">
+                    <Trophy size={18} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-display text-lg font-semibold text-ink">{rewards("achievements")}</span>
+                    <span className="block text-sm text-muted">
+                      {rewards("achievementSummary", {
+                        all: achievements.length,
+                        unlocked: unlockedCount,
+                      })}
+                    </span>
+                  </span>
+                  <ChevronDown
+                    size={18}
+                    className={`shrink-0 text-muted transition-transform ${showAchievements ? "rotate-180" : ""}`}
+                  />
+                </button>
+                <Button
+                  type="button"
+                  onClick={handleSyncAchievements}
+                  disabled={checkingAchievements}
+                  variant="outline"
+                  className="shrink-0 gap-2 text-xs"
+                >
+                  <RefreshCw size={14} className={checkingAchievements ? "animate-spin text-accent" : ""} />
+                  {checkingAchievements ? rewards("checkingAchievements") : rewards("syncAchievements")}
+                </Button>
+              </div>
+
+              {showAchievements && <>
+              {/* Filters and Search Bar */}
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-1.5 rounded-xl border border-line bg-surface p-1">
+                  <button
+                    type="button"
+                    onClick={() => setAchievementFilter("all")}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      achievementFilter === "all" ? "bg-accent text-accent-ink" : "text-muted hover:text-ink"
+                    }`}
+                  >
+                    {rewards("filterAll")} ({achievements.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAchievementFilter("unlocked")}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      achievementFilter === "unlocked" ? "bg-accent text-accent-ink" : "text-muted hover:text-ink"
+                    }`}
+                  >
+                    {rewards("filterUnlocked")} ({unlockedCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAchievementFilter("locked")}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                      achievementFilter === "locked" ? "bg-accent text-accent-ink" : "text-muted hover:text-ink"
+                    }`}
+                  >
+                    {rewards("filterLocked")} ({achievements.length - unlockedCount})
+                  </button>
+                </div>
+
+                <div className="relative w-full sm:w-64">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+                  <input
+                    type="text"
+                    value={achievementSearch}
+                    onChange={(e) => setAchievementSearch(e.target.value)}
+                    placeholder={rewards("searchPlaceholder")}
+                    className="h-9 w-full rounded-xl border border-line bg-bg1 pl-8 pr-3 text-xs text-ink placeholder:text-muted focus:border-accent focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {filteredAchievements.length === 0 ? (
+                <p className="mt-6 text-sm text-muted">{rewards("achievementsEmpty")}</p>
+              ) : (
+                <ul className="mt-5 divide-y divide-line">
+                  {filteredAchievements.map((achievement) => {
+                    const isUnlocked = Boolean(achievement.unlockedAt);
+                    const progress = computeAchievementProgress(achievement.criteria, achievementStats);
+
+                    return (
+                      <li key={achievement.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                          <span
+                            className={`mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl border ${
+                              isUnlocked
+                                ? "border-accent/30 bg-accent/15 text-accent shadow-sm"
+                                : "border-line bg-surface2 text-faint"
+                            }`}
+                          >
+                            <AchievementIcon icon={achievement.icon} unlocked={isUnlocked} />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-sm text-ink">{messages(achievement.name_key)}</span>
+                              {isUnlocked && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent">
+                                  <Check size={11} /> {rewards("unlocked")}
+                                </span>
+                              )}
+                            </div>
+                            <p className="mt-0.5 text-xs text-muted">{messages(achievement.description_key)}</p>
+
+                            {/* Progress bar for locked achievements */}
+                            {!isUnlocked && progress && (
+                              <div className="mt-2.5 max-w-sm space-y-1">
+                                <div className="flex items-center justify-between text-[11px] text-muted">
+                                  <span>{rewards("progressLabel")}</span>
+                                  <span className="num font-medium text-ink">
+                                    {progress.currentDisplay} / {progress.targetDisplay} ({progress.percent}%)
+                                  </span>
+                                </div>
+                                <Progress value={progress.percent} className="h-1.5" />
+                              </div>
+                            )}
+
+                            {isUnlocked && achievement.unlockedAt && (
+                              <p className="mt-1 text-[11px] text-faint">
+                                {rewards("unlockedOn", {
+                                  date: new Date(achievement.unlockedAt).toLocaleDateString(
+                                    locale === "id" ? "id-ID" : "en-US",
+                                    { day: "numeric", month: "short", year: "numeric" }
+                                  ),
+                                })}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1 shrink-0 pt-2 sm:pt-0">
+                          <span className="rounded-lg bg-surface2 px-2.5 py-1 text-xs font-semibold text-accent border border-line">
+                            +{achievement.points_reward} pts
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              </>}
+            </CardContent></Card>
+
+            {/* Riwayat Poin (Points Log) */}
+            <Card><CardContent className="p-5">
+              <button
+                type="button"
+                aria-expanded={showPointsHistory}
+                onClick={() => setShowPointsHistory((open) => !open)}
+                className="flex w-full items-center gap-3 text-left"
+              >
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-surface2 text-accent">
+                  <History size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-display text-lg font-semibold text-ink">{rewards("pointsHistory")}</span>
+                  <span className="block text-sm text-muted">
+                    {rewards("pointsHistoryCount", { count: pointsLog.length })}
+                  </span>
+                </span>
+                <ChevronDown
+                  size={18}
+                  className={`shrink-0 text-muted transition-transform ${showPointsHistory ? "rotate-180" : ""}`}
+                />
+              </button>
+
+              {showPointsHistory && <>
+              {pointsLog.length === 0 ? (
+                <p className="mt-5 text-sm text-muted">{rewards("pointsHistoryEmpty")}</p>
+              ) : (
+                <ul className="mt-4 divide-y divide-line">
+                  {pointsLog.map((log) => (
+                    <li key={log.id} className="flex items-center justify-between py-3">
+                      <div className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium text-ink truncate">{log.reason || log.action}</span>
+                        <span className="mt-0.5 block text-xs text-muted">
+                          {new Date(log.created_at).toLocaleDateString(locale === "id" ? "id-ID" : "en-US", {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </span>
+                      </div>
+                      <span className="num shrink-0 ml-3 rounded-md bg-accent/10 px-2 py-0.5 text-xs font-semibold text-accent">
+                        +{log.delta} pts
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              </>}
+            </CardContent></Card>
           </section>;
         })()}
 
@@ -910,7 +1311,45 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
   );
 }
 
-type AchievementRow = { id: string; name_key: string; description_key: string; points_reward: number; unlockedAt: string | null };
+type AchievementRow = {
+  id: string;
+  code: string;
+  name_key: string;
+  description_key: string;
+  icon: string | null;
+  points_reward: number;
+  criteria: AchievementCriteria;
+  unlockedAt: string | null;
+};
+
+function AchievementIcon({ icon, unlocked }: { icon: string | null; unlocked: boolean }) {
+  const iconClass = unlocked ? "text-accent" : "text-faint";
+  const size = 16;
+  switch (icon) {
+    case "flame":
+      return <Flame size={size} className={iconClass} />;
+    case "play":
+      return <Play size={size} className={iconClass} />;
+    case "list-check":
+      return <ListChecks size={size} className={iconClass} />;
+    case "target":
+      return <Target size={size} className={iconClass} />;
+    case "piggy-bank":
+      return <PiggyBank size={size} className={iconClass} />;
+    case "shield-check":
+      return <ShieldCheck size={size} className={iconClass} />;
+    case "gauge":
+      return <Gauge size={size} className={iconClass} />;
+    case "vault":
+      return <Landmark size={size} className={iconClass} />;
+    case "pie-chart":
+      return <PieChart size={size} className={iconClass} />;
+    case "file-text":
+      return <FileText size={size} className={iconClass} />;
+    default:
+      return <Trophy size={size} className={iconClass} />;
+  }
+}
 
 function Empty({ text }: { text: string }) {
   return <Card><CardContent className="p-8 text-center text-sm text-muted">{text}</CardContent></Card>;

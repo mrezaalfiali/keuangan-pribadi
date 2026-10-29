@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -287,6 +287,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [rewardFailed, setRewardFailed] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<TxRow | null>(null);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [mobileActionsTxId, setMobileActionsTxId] = useState<number | null>(null);
+  const mobileActionsMenuRef = useRef<HTMLDivElement>(null);
   const [type, setType] = useState<"income" | "expense">("expense");
   const [allocationMode, setAllocationMode] = useState<"auto" | "single">("auto");
   const [formVaultId, setFormVaultId] = useState("");
@@ -332,6 +334,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [recurringIntervalCount, setRecurringIntervalCount] = useState(1);
   const [editVaultId, setEditVaultId] = useState("");
   const [editFundingSourceId, setEditFundingSourceId] = useState("");
+
+  useEffect(() => {
+    if (mobileActionsTxId === null) return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !mobileActionsMenuRef.current?.contains(event.target)) {
+        setMobileActionsTxId(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileActionsTxId(null);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileActionsTxId]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(min-width: 1024px)");
@@ -1006,6 +1028,41 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       console.error("Supabase transaction delete failed.", deleteError);
       setError(settings("deleteError"));
     }
+  }
+
+  function startEditingTransaction(transaction: TxRow) {
+    setMobileActionsTxId(null);
+    setEditError("");
+    setEditingTransaction(transaction);
+    setEditVaultId(transaction.vault_id ?? "");
+    setEditFundingSourceId(transaction.funding_source_id ?? "");
+  }
+
+  function duplicateTransaction(transaction: TxRow) {
+    setMobileActionsTxId(null);
+    const prefill = {
+      type: transaction.type === "income" ? "income" as const : "expense" as const,
+      amount: transaction.amount,
+      date: transaction.date,
+      categoryId: transaction.category_id ?? "",
+      vaultId: transaction.vault_id ?? "",
+      fundingSourceId: transaction.funding_source_id ?? "",
+      note: transaction.note ?? "",
+    };
+    setFormPrefill(prefill);
+    setType(prefill.type);
+    if (transaction.type === "income") {
+      setAllocationMode(prefill.vaultId ? "single" : "auto");
+    }
+    setFormVaultId(prefill.vaultId);
+    setFormFundingSourceId(prefill.fundingSourceId);
+    setAddFormKey((key) => key + 1);
+    setAddFormOpen(true);
+    setEditingTransaction(null);
+    document.getElementById("transaction-add-form")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
   }
 
   async function saveTransactionEdit(event: FormEvent<HTMLFormElement>) {
@@ -2248,6 +2305,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               locale === "id" ? "id-ID" : "en-US"
                             );
                             const isEditing = editingTransaction?.id === transaction.id;
+                            const supportsEditAndCopy =
+                              transaction.type !== "transfer" && !transaction.group_id;
                             return (
                               <li key={transaction.id} className="py-1">
                                 <div className="flex items-center gap-2 sm:gap-3 py-2 min-w-0">
@@ -2288,72 +2347,117 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                     aria-label={txText("details")}
                                     className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
                                   >
-                                    <ChevronDown size={16} className={`transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                                    <ChevronDown
+                                      size={16}
+                                      className={`transition-transform ${
+                                        isExpanded ? "rotate-0 md:rotate-180" : "-rotate-90 md:rotate-0"
+                                      }`}
+                                    />
                                   </button>
-                                  {transaction.type !== "transfer" && !transaction.group_id ? (
-                                    <button
-                                      type="button"
-                                      disabled={savingEdit}
-                                      onClick={() => { if (isEditing) { setEditingTransaction(null); setEditError(""); return; } setEditError(""); setEditingTransaction(transaction); setEditVaultId(transaction.vault_id ?? ""); setEditFundingSourceId(transaction.funding_source_id ?? ""); }}
-                                      aria-label={txText("editTitle")}
-                                      className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
-                                    >
-                                      <Pencil size={16} />
-                                    </button>
-                                  ) : (
-                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
-                                  )}
-                                  {transaction.type !== "transfer" && !transaction.group_id && !isEditing ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        const prefill = {
-                                          type: transaction.type === "income" ? "income" as const : "expense" as const,
-                                          amount: transaction.amount,
-                                          date: transaction.date,
-                                          categoryId: transaction.category_id ?? "",
-                                          vaultId: transaction.vault_id ?? "",
-                                          fundingSourceId: transaction.funding_source_id ?? "",
-                                          note: transaction.note ?? "",
-                                        };
-                                        setFormPrefill(prefill);
-                                        setType(prefill.type);
-                                        if (transaction.type === "income") {
-                                          if (prefill.vaultId) {
-                                            setAllocationMode("single");
-                                          } else {
-                                            setAllocationMode("auto");
-                                          }
-                                        }
-                                        setFormVaultId(prefill.vaultId);
-                                        setFormFundingSourceId(prefill.fundingSourceId);
-                                        setAddFormKey((k) => k + 1);
-                                        setAddFormOpen(true);
-                                        setEditingTransaction(null);
-                                        const formEl = document.getElementById("transaction-add-form");
-                                        if (formEl) {
-                                          formEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                                        }
-                                      }}
-                                      aria-label={txText("duplicateTx")}
-                                      title={txText("duplicateTx")}
-                                      className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
-                                    >
-                                      <Copy size={16} />
-                                    </button>
-                                  ) : transaction.type !== "transfer" && !transaction.group_id && isEditing ? (
-                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
-                                  ) : (
-                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => void removeTransaction(transaction.id)}
-                                    aria-label={common("delete")}
-                                    className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-danger shrink-0"
+                                  <div
+                                    ref={mobileActionsTxId === transaction.id ? mobileActionsMenuRef : null}
+                                    className="relative shrink-0 md:hidden"
                                   >
-                                    <Trash2 size={16} />
-                                  </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setMobileActionsTxId(
+                                          mobileActionsTxId === transaction.id ? null : transaction.id
+                                        )
+                                      }
+                                      aria-label={txText("transactionActions")}
+                                      aria-expanded={mobileActionsTxId === transaction.id}
+                                      className="rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink"
+                                    >
+                                      <EllipsisVertical size={18} />
+                                    </button>
+                                    {mobileActionsTxId === transaction.id && (
+                                      <div
+                                        className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg"
+                                      >
+                                        <button
+                                          type="button"
+                                          disabled={!supportsEditAndCopy || savingEdit}
+                                          onClick={() => {
+                                            setMobileActionsTxId(null);
+                                            if (isEditing) {
+                                              setEditingTransaction(null);
+                                              setEditError("");
+                                            } else {
+                                              startEditingTransaction(transaction);
+                                            }
+                                          }}
+                                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                          <Pencil size={15} />
+                                          {txText("editTitle")}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={!supportsEditAndCopy || isEditing}
+                                          onClick={() => duplicateTransaction(transaction)}
+                                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                          <Copy size={15} />
+                                          {txText("duplicateTx")}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setMobileActionsTxId(null);
+                                            void removeTransaction(transaction.id);
+                                          }}
+                                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                                        >
+                                          <Trash2 size={15} />
+                                          {common("delete")}
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="hidden items-center md:flex">
+                                    {supportsEditAndCopy ? (
+                                      <button
+                                        type="button"
+                                        disabled={savingEdit}
+                                        onClick={() => {
+                                          if (isEditing) {
+                                            setEditingTransaction(null);
+                                            setEditError("");
+                                          } else {
+                                            startEditingTransaction(transaction);
+                                          }
+                                        }}
+                                        aria-label={txText("editTitle")}
+                                        className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
+                                      >
+                                        <Pencil size={16} />
+                                      </button>
+                                    ) : (
+                                      <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
+                                    )}
+                                    {supportsEditAndCopy && !isEditing ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => duplicateTransaction(transaction)}
+                                        aria-label={txText("duplicateTx")}
+                                        title={txText("duplicateTx")}
+                                        className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
+                                      >
+                                        <Copy size={16} />
+                                      </button>
+                                    ) : (
+                                      <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => void removeTransaction(transaction.id)}
+                                      aria-label={common("delete")}
+                                      className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-danger shrink-0"
+                                    >
+                                      <Trash2 size={16} />
+                                    </button>
+                                  </div>
                                 </div>
                                 {isEditing && transactionEditForm(transaction)}
                                 {isExpanded && !isEditing && (

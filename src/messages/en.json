@@ -139,7 +139,7 @@
   "transactions": {
     "title": "Transactions",
     "addTitle": "Record Transaction",
-    "editTitle": "Edit Transaction",
+    "editTitle": "Edit",
     "type": "Type",
     "income": "Income",
     "expense": "Expense",
@@ -218,6 +218,7 @@
     "monthNet": "Net",
     "fundedBy": "from",
     "details": "Details",
+    "transactionActions": "Transaction actions",
     "addSource": "Add Source",
     "deleteSource": "Delete source",
     "deleteSourceConfirm": "Delete this source? Only sources with a 0 balance can be deleted. Past transactions are kept.",
@@ -421,6 +422,7 @@
     "nextRankHint": "{points} more points to reach the next rank.",
     "maxRank": "Top rank reached. Keep building healthy money habits!",
     "achievements": "Achievements",
+    "achievementSummary": "{all} missions · {unlocked} unlocked",
     "unlocked": "Unlocked",
     "locked": "Locked",
     "streakTitle": "Discipline Streak",
@@ -429,7 +431,23 @@
     "logToday": "Record a transaction today to keep your streak!",
     "allUnlocked": "All achievements unlocked. Impressive!",
     "days": "days",
-    "achievementsEmpty": "The achievement list is not available yet."
+    "achievementsEmpty": "The achievement list is not available yet.",
+    "filterAll": "All",
+    "filterUnlocked": "Unlocked",
+    "filterLocked": "Locked",
+    "searchPlaceholder": "Search achievements...",
+    "syncAchievements": "Check Achievements",
+    "checkingAchievements": "Checking...",
+    "syncSuccess": "{count} new achievement(s) unlocked (+{points} points)!",
+    "syncUpToDate": "All achievements are up to date.",
+    "pointsHistory": "Points History",
+    "pointsHistoryCount": "{count} entries",
+    "pointsHistoryEmpty": "No points history recorded yet.",
+    "rankTiers": "Rank Tiers & Milestones",
+    "rankTiersSubtitle": "Earn points from daily habits and achievements to climb ranks.",
+    "ptsThreshold": "{points} pts",
+    "progressLabel": "Progress",
+    "unlockedOn": "Unlocked on {date}"
   },
   "about": {
     "title": "About",
@@ -575,7 +593,7 @@
       "desc": "7-day logging streak."
     },
     "streak30": {
-      "name": "Monthly Streak",
+      "name": "30-Day Streak",
       "desc": "30-day logging streak."
     },
     "tx50": {
@@ -608,7 +626,27 @@
     },
     "ratio20": {
       "name": "Healthy Ratio",
-      "desc": "Savings/expense ratio ≥ 20% for a month."
+      "desc": "Save at least 20% of your income in a month."
+    },
+    "streak100": {
+      "name": "Discipline Centurion",
+      "desc": "100-day logging streak."
+    },
+    "tx100": {
+      "name": "Resilient Logger",
+      "desc": "Record 100 transactions."
+    },
+    "firstVault": {
+      "name": "Financial Architect",
+      "desc": "Create your first savings vault."
+    },
+    "firstBudget": {
+      "name": "Budget Master",
+      "desc": "Set your first budget limit."
+    },
+    "firstNote": {
+      "name": "Mindful Notes",
+      "desc": "Write your first personal finance note."
     }
   },
   "points": {

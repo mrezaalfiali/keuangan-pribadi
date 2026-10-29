@@ -9,10 +9,10 @@ transaksi, vault, anggaran, alokasi, dan reward disimpan di Supabase.
 2. Buka **SQL Editor**:
     - Proyek baru: jalankan seluruh isi
       [`supabase/migrations/0001_init.sql`](./supabase/migrations/0001_init.sql),
-      lalu migrasi `0002` sampai `0021` secara berurutan.
+      lalu migrasi `0002` sampai `0024` secara berurutan.
    - Proyek yang sudah memiliki sebagian tabel: jalankan
      [`supabase/migrations/0002_complete_supabase_schema.sql`](./supabase/migrations/0002_complete_supabase_schema.sql).
-     Lanjutkan dengan migrasi `0003` sampai `0021` secara berurutan. Migrasi
+     Lanjutkan dengan migrasi `0003` sampai `0024` secara berurutan. Migrasi
      `0002` aman dijalankan berulang kali dan melengkapi tabel yang belum ada.
      Jangan jalankan ulang `0001` pada proyek yang sudah memiliki tabel karena
      beberapa kebijakan di dalamnya tidak dibuat secara idempoten.

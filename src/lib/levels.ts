@@ -6,7 +6,7 @@ export interface LevelInfo {
   progress: number; // 0..1 toward next level
 }
 
-const LEVELS: Array<{ titleKey: string; color: string; min: number }> = [
+export const LEVELS: Array<{ titleKey: string; color: string; min: number }> = [
   { titleKey: "rank.bronze", color: "#d97706", min: 0 },
   { titleKey: "rank.bronze2", color: "#f59e0b", min: 250 },
   { titleKey: "rank.silver", color: "#94a3b8", min: 600 },

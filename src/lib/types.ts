@@ -121,6 +121,7 @@ export interface Achievement {
   id: string;
   code: string;
   name_key: string;
+  description_key?: string;
   icon: string | null;
   points_reward: number;
   criteria: AchievementCriteria;
@@ -131,13 +132,25 @@ export type AchievementCriteria =
   | { type: "transaction_count"; count: number }
   | { type: "no_vault_withdraw"; vault_slug: string; months: number }
   | { type: "vault_goal"; vault_slug: string; ratio: number }
-  | { type: "savings_ratio"; ratio: number; months: number };
+  | { type: "savings_ratio"; ratio: number; months: number }
+  | { type: "vault_count"; count: number }
+  | { type: "budget_count"; count: number }
+  | { type: "note_count"; count: number };
 
 export interface UserAchievement {
   user_id: string;
   achievement_id: string;
   unlocked_at: string;
   achievement?: Achievement;
+}
+
+export interface PointsLogRow {
+  id: string;
+  user_id: string;
+  action: string;
+  delta: number;
+  reason: string | null;
+  created_at: string;
 }
 
 export interface VaultBalance {
