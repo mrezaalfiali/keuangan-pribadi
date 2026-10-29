@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -21,11 +21,12 @@ import {
   type SourceSummary,
 } from "@/src/lib/sources";
 import { resolveLabel, humanizeSlug, sortByLabel } from "@/src/lib/labels";
-import { todayISO } from "@/src/lib/utils";
+import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
 import { budgetSpend, budgetState, budgetStatus } from "@/src/lib/budget";
 import { filterTransactions } from "@/src/lib/transaction-filters";
 import { todayJakartaISO } from "@/src/lib/recurring";
+import { downloadCsv, toCsv } from "@/src/lib/csv";
 import { getOnboardingSteps } from "@/src/lib/onboarding-checklist";
 import { Link } from "@/src/i18n/navigation";
 import {
@@ -315,6 +316,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [filterSearch, setFilterSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<"date_desc" | "amount_desc" | "amount_asc">("date_desc");
   const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const [formPrefill, setFormPrefill] = useState<{ type?: "income" | "expense"; amount?: number | string; date?: string; categoryId?: string; vaultId?: string; fundingSourceId?: string; note?: string; allocationMode?: "auto" | "single" } | null>(null);
+  const [addFormKey, setAddFormKey] = useState(0);
   const [summaryMonth, setSummaryMonth] = useState(todayISO().slice(0, 7));
   const [recurringFormOpen, setRecurringFormOpen] = useState(false);
   const [recurringSectionOpen, setRecurringSectionOpen] = useState(false);
@@ -1800,7 +1803,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               {txText("addTitle")}
             </button>
           ) : (
-            <form onSubmit={submitTransaction} className="mt-5 flex flex-col gap-4 w-full max-w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+            <form id="transaction-add-form" key={addFormKey} onSubmit={(e) => { setFormPrefill(null); void submitTransaction(e); }} className="mt-5 flex flex-col gap-4 w-full max-w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
             <Field label={txText("type")}>
               <select name="type" value={type} onChange={(event) => {
                 setType(event.target.value as "income" | "expense");
@@ -1810,8 +1813,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 <option value="expense">{txText("expense")}</option>
               </select>
             </Field>
-            <Field label={txText("amount")}><Input name="amount" type="number" min="1" step="1" required /></Field>
-            <Field label={txText("date")}><Input name="date" type="date" defaultValue={todayISO()} required /></Field>
+            <Field label={txText("amount")}><Input name="amount" type="number" min="1" step="1" defaultValue={formPrefill?.amount ?? ""} required /></Field>
+            <Field label={txText("date")}><Input name="date" type="date" defaultValue={formPrefill?.date ?? todayISO()} required /></Field>
             {type === "income" && (
               <Field label={txText("allocationMode")} hint={txText(allocationMode === "auto" ? "allocationAutoHint" : "allocationSingleHint")}>
                 <div className="grid grid-cols-2 gap-2">
@@ -1865,7 +1868,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               </select>
             </Field>
             <Field label={txText("category")}>
-              <select key={type} name="categoryId" defaultValue="" required={categories.some((category) => category.type === type)} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
+              <select key={type} name="categoryId" defaultValue={formPrefill?.categoryId ?? ""} required={categories.some((category) => category.type === type)} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
                 <option value="">{common("none")}</option>
                 {categories.filter((category) => category.type === type).map((category) => (
                   <option key={category.id} value={category.id}>
@@ -1904,7 +1907,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 </select>
               </Field>
             )}
-            <Field label={txText("note")}><Input name="note" maxLength={200} /></Field>
+            <Field label={txText("note")}><Input name="note" maxLength={200} defaultValue={formPrefill?.note ?? ""} /></Field>
             {formError && <p role="alert" className="text-sm text-danger">{formError}</p>}
             <Button type="submit" disabled={saving}>{saving ? common("loading") : common("save")}</Button>
             </form>
@@ -1915,14 +1918,46 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               <h2 className="font-display text-lg font-semibold text-ink">
                 {section === "dashboard" ? dashboard("recentTx") : txText("title")}
               </h2>
-              {section === "transactions" && filteredTransactions.length > 0 && (
-                <p className="text-xs text-faint">
-                  {txText("filterCount", {
-                    count: filteredTransactions.length.toLocaleString(
-                      locale === "id" ? "id-ID" : "en-US"
-                    ),
-                  })}
-                </p>
+              {section === "transactions" && (
+                <div className="flex items-center gap-2">
+                  {filteredTransactions.length > 0 && (
+                    <p className="text-xs text-faint">
+                      {txText("filterCount", {
+                        count: filteredTransactions.length.toLocaleString(
+                          locale === "id" ? "id-ID" : "en-US"
+                        ),
+                      })}
+                    </p>
+                  )}
+                  {sortedTransactions.length > 0 && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        try {
+                          const header = ["tanggal", "tipe", "kategori", "brankas", "sumber_dana", "nominal", "catatan"];
+                          const rows = sortedTransactions.map((tx) => {
+                            const typeLabel = tx.type === "income" ? "Pemasukan" : tx.type === "expense" ? "Pengeluaran" : "Transfer";
+                            const category = categoryLabel(tx.category) ?? "";
+                            const vault = vaultLabel(tx.vault) ?? "";
+                            const funding = categoryLabel(tx.funding) ?? "";
+                            const note = (tx.note ?? "").replace(/\r?\n/g, " ");
+                            return [tx.date, typeLabel, category, vault, funding, String(tx.amount), note];
+                          });
+                          const csv = toCsv([header, ...rows]);
+                          downloadCsv(`transaksi-${todayISO()}.csv`, csv);
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                    >
+                      <Download size={14} />
+                      {txText("exportCsv")}
+                    </Button>
+                  )}
+                </div>
               )}
             </div>
             {section === "transactions" && (
@@ -1957,6 +1992,63 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     {txText("filterExpense")}
                   </button>
                   <div className="ml-auto flex flex-wrap items-center gap-1 mb-2 sm:mb-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFilterFromDate(todayISO());
+                        setFilterToDate(todayISO());
+                        setFiltersExpanded(true);
+                      }}
+                      className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterFromDate === todayISO() && filterToDate === todayISO() ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
+                    >
+                      {txText("filterPresetToday")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const to = todayISO();
+                        const d = new Date(`${to}T00:00:00`);
+                        d.setDate(d.getDate() - 6);
+                        const from = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                        setFilterFromDate(from);
+                        setFilterToDate(to);
+                        setFiltersExpanded(true);
+                      }}
+                      className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterToDate === todayISO() && filterFromDate === (() => { const to = todayISO(); const d = new Date(`${to}T00:00:00`); d.setDate(d.getDate() - 6); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })() ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
+                    >
+                      {txText("filterPreset7")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const to = todayISO();
+                        const d = new Date(`${to}T00:00:00`);
+                        d.setDate(d.getDate() - 29);
+                        const from = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                        setFilterFromDate(from);
+                        setFilterToDate(to);
+                        setFiltersExpanded(true);
+                      }}
+                      className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterToDate === todayISO() && filterFromDate === (() => { const to = todayISO(); const d = new Date(`${to}T00:00:00`); d.setDate(d.getDate() - 29); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })() ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
+                    >
+                      {txText("filterPreset30")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const m = currentMonthISO();
+                        setFilterFromDate(m);
+                        const d = new Date(`${m}T00:00:00`);
+                        d.setMonth(d.getMonth() + 1);
+                        d.setDate(0);
+                        const to = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+                        setFilterToDate(to);
+                        setFiltersExpanded(true);
+                      }}
+                      className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterFromDate === currentMonthISO() && filterToDate === (() => { const m = currentMonthISO(); const d = new Date(`${m}T00:00:00`); d.setMonth(d.getMonth() + 1); d.setDate(0); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })() ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
+                    >
+                      {txText("filterPresetMonth")}
+                    </button>
                     <select
                       value={sortOrder}
                       onChange={(event) => setSortOrder(event.target.value as "date_desc" | "amount_desc" | "amount_asc")}
@@ -2208,6 +2300,49 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                     >
                                       <Pencil size={16} />
                                     </button>
+                                  ) : (
+                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
+                                  )}
+                                  {transaction.type !== "transfer" && !transaction.group_id && !isEditing ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const prefill = {
+                                          type: transaction.type === "income" ? "income" as const : "expense" as const,
+                                          amount: transaction.amount,
+                                          date: transaction.date,
+                                          categoryId: transaction.category_id ?? "",
+                                          vaultId: transaction.vault_id ?? "",
+                                          fundingSourceId: transaction.funding_source_id ?? "",
+                                          note: transaction.note ?? "",
+                                        };
+                                        setFormPrefill(prefill);
+                                        setType(prefill.type);
+                                        if (transaction.type === "income") {
+                                          if (prefill.vaultId) {
+                                            setAllocationMode("single");
+                                          } else {
+                                            setAllocationMode("auto");
+                                          }
+                                        }
+                                        setFormVaultId(prefill.vaultId);
+                                        setFormFundingSourceId(prefill.fundingSourceId);
+                                        setAddFormKey((k) => k + 1);
+                                        setAddFormOpen(true);
+                                        setEditingTransaction(null);
+                                        const formEl = document.getElementById("transaction-add-form");
+                                        if (formEl) {
+                                          formEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                                        }
+                                      }}
+                                      aria-label={txText("duplicateTx")}
+                                      title={txText("duplicateTx")}
+                                      className="rounded-lg p-1.5 sm:p-2 text-faint hover:bg-surface2 hover:text-ink shrink-0"
+                                    >
+                                      <Copy size={16} />
+                                    </button>
+                                  ) : transaction.type !== "transfer" && !transaction.group_id && isEditing ? (
+                                    <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
                                   ) : (
                                     <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
                                   )}
