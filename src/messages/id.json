@@ -436,7 +436,7 @@
     "filterUnlocked": "Terbuka",
     "filterLocked": "Terkunci",
     "searchPlaceholder": "Cari achievement...",
-    "syncAchievements": "Periksa Pencapaian",
+    "syncAchievements": "Periksa",
     "checkingAchievements": "Memeriksa...",
     "syncSuccess": "{count} achievement baru terbuka (+{points} poin)!",
     "syncUpToDate": "Semua achievement sudah mutakhir.",

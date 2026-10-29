@@ -436,7 +436,7 @@
     "filterUnlocked": "Unlocked",
     "filterLocked": "Locked",
     "searchPlaceholder": "Search achievements...",
-    "syncAchievements": "Check Achievements",
+    "syncAchievements": "Check",
     "checkingAchievements": "Checking...",
     "syncSuccess": "{count} new achievement(s) unlocked (+{points} points)!",
     "syncUpToDate": "All achievements are up to date.",
