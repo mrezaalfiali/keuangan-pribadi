@@ -8,7 +8,7 @@ export interface FilterableTransaction {
 }
 
 export interface TransactionFilters {
-  type: "" | "income" | "expense";
+  type: "" | "income" | "expense" | "transfer";
   fromDate: string;
   toDate: string;
   minAmount: string;

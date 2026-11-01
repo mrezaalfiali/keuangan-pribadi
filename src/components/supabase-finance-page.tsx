@@ -25,6 +25,7 @@ import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
 import { budgetSpend, budgetState, budgetStatus } from "@/src/lib/budget";
 import { filterTransactions } from "@/src/lib/transaction-filters";
+import { incomeLockedVaultError } from "@/src/lib/vault-ledger";
 import { todayJakartaISO } from "@/src/lib/recurring";
 import { downloadCsv, toCsv } from "@/src/lib/csv";
 import { getOnboardingSteps } from "@/src/lib/onboarding-checklist";
@@ -289,9 +290,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [savingEdit, setSavingEdit] = useState(false);
   const [mobileActionsTxId, setMobileActionsTxId] = useState<number | null>(null);
   const mobileActionsMenuRef = useRef<HTMLDivElement>(null);
-  const [type, setType] = useState<"income" | "expense">("expense");
+  const [type, setType] = useState<"income" | "expense" | "transfer">("expense");
   const [allocationMode, setAllocationMode] = useState<"auto" | "single">("auto");
   const [formVaultId, setFormVaultId] = useState("");
+  const [formDestinationVaultId, setFormDestinationVaultId] = useState("");
   const [formFundingSourceId, setFormFundingSourceId] = useState("");
   const [addFormOpen, setAddFormOpen] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<number | null>(null);
@@ -306,7 +308,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [editingSourceId, setEditingSourceId] = useState("");
   const [editingSourceName, setEditingSourceName] = useState("");
   const [sourceEditError, setSourceEditError] = useState("");
-  const [filterType, setFilterType] = useState<"" | "income" | "expense">("");
+  const [filterType, setFilterType] = useState<"" | "income" | "expense" | "transfer">("");
   const [filterMonth, setFilterMonth] = useState("");
   const [filterFromDate, setFilterFromDate] = useState("");
   const [filterToDate, setFilterToDate] = useState("");
@@ -432,7 +434,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       }
       const overrides = (overrideResult.data ?? []) as SourceOverride[];
       setTransactions((txResult.data ?? []) as TxRow[]);
-      setVaults((vaultResult.data ?? []) as Vault[]);
+      setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setSourceOverrides(overrides);
       setCategories(sortByLabel(applySourceOverrides(categories, overrides), categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
@@ -545,7 +547,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       ? expenseCategories
       : filterType === "income"
         ? incomeCategories
-        : [...incomeCategories, ...expenseCategories]
+        : filterType === "transfer"
+          // Transfer tidak punya kategori; menampilkan daftar kategori di sini
+          // hanya menghasilkan filter yang tidak mungkin cocok.
+          ? []
+          : [...incomeCategories, ...expenseCategories]
   );
   const vaultOptions = vaults.filter((vault) => usedVaultIds.has(vault.id));
   const fundingSourceOptions = incomeCategories;
@@ -632,7 +638,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
    * kosong tanpa sebab yang jelas. Dilakukan di event, bukan effect, supaya
    * tidak memicu render kedua.
    */
-  function changeFilterType(next: "" | "income" | "expense") {
+  function changeFilterType(next: "" | "income" | "expense" | "transfer") {
     if (next === filterType) return;
     setFilterType(next);
     setFilterCategory("");
@@ -945,6 +951,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     const amount = Number(data.get("amount"));
     const date = String(data.get("date") ?? "");
     const vaultId = String(data.get("vaultId") ?? "") || null;
+    const destinationVaultId = String(data.get("destinationVaultId") ?? "") || null;
     const categoryId = String(data.get("categoryId") ?? "") || null;
     const fundingSourceId = String(data.get("fundingSourceId") ?? "") || null;
     // Blocked before the request goes out; the server repeats the check.
@@ -953,6 +960,18 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       return;
     }
     if (type === "expense" && !fundingSourceId) {
+      setFormError(vaultSources.length === 0 ? txText("noSourceInVault") : emptySourceHint);
+      return;
+    }
+    if (type === "transfer" && !vaultId) {
+      setFormError(txText("transferSourceRequired"));
+      return;
+    }
+    if (type === "transfer" && (!destinationVaultId || destinationVaultId === vaultId)) {
+      setFormError(txText("transferDestinationRequired"));
+      return;
+    }
+    if (type === "transfer" && !fundingSourceId) {
       setFormError(vaultSources.length === 0 ? txText("noSourceInVault") : emptySourceHint);
       return;
     }
@@ -970,8 +989,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         amount,
         date,
         categoryId,
-        fundingSourceId: type === "expense" ? fundingSourceId : null,
+        fundingSourceId: type === "expense" || type === "transfer" ? fundingSourceId : null,
         vaultId,
+        destinationVaultId: type === "transfer" ? destinationVaultId : null,
         allocationMode: type === "income" ? allocationMode : null,
         note: String(data.get("note") ?? "").trim() || null,
       });
@@ -1003,6 +1023,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       }
       form.reset();
       setFormVaultId("");
+      setFormDestinationVaultId("");
       setFormFundingSourceId("");
       await load();
       if (section === "dashboard") setAddFormOpen(false);
@@ -1020,7 +1041,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     try {
       const result = await deleteTransaction(locale, id);
       if (!result.ok) {
-        setError(settings("deleteError"));
+        setError(result.error === "transactions.lockedError" ? txText("lockedError") : settings("deleteError"));
         return;
       }
       await load();
@@ -1079,6 +1100,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       setSavingEdit(false);
       return;
     }
+    if (editingTransaction.type === "income" && !String(formData.get("vaultId") ?? "")) {
+      setEditError(txText("vaultRequired"));
+      setSavingEdit(false);
+      return;
+    }
+    if (editingTransaction.type === "income") {
+      const lockedGuard = incomeLockedVaultError({
+        oldVaultId: editingTransaction.vault_id,
+        oldVaultLocked:
+          vaults.find((vault) => vault.id === editingTransaction.vault_id)?.is_locked ?? false,
+        newVaultId: String(formData.get("vaultId") ?? "") || null,
+        oldAmount: editingTransaction.amount,
+        newAmount: amount,
+      });
+      if (lockedGuard) {
+        setEditError(txText("lockedError"));
+        setSavingEdit(false);
+        return;
+      }
+    }
     try {
       const result = await editTransaction(locale, {
         id: editingTransaction.id,
@@ -1100,6 +1141,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         else if (result.error === "transactions.insufficient") setEditError(txText("insufficient"));
         else if (result.error === "transactions.lockedError") setEditError(txText("lockedError"));
         else if (result.error === "transactions.expenseVaultRequired") setEditError(txText("expenseVaultRequired"));
+        else if (result.error === "transactions.vaultRequired") setEditError(txText("vaultRequired"));
         else setEditError(settings("saveError"));
         return;
       }
@@ -1155,12 +1197,14 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         <Field
           label={txText("sourceVault")}
           hint={
-            transaction.type === "expense"
+            transaction.type === "expense" || transaction.type === "income"
               ? vaults.length === 0
                 ? txText("recurringVaultNone")
                 : editVaultId
                   ? undefined
-                  : txText("expenseVaultRequired")
+                  : transaction.type === "expense"
+                    ? txText("expenseVaultRequired")
+                    : txText("vaultRequired")
               : undefined
           }
         >
@@ -1171,10 +1215,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               setEditVaultId(event.target.value);
               setEditFundingSourceId("");
             }}
-            required={transaction.type === "expense"}
+            required={transaction.type === "expense" || transaction.type === "income"}
             className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
           >
-            <option value="" disabled={transaction.type === "expense"}>{transaction.type === "expense" ? txText("selectVault") : settings("noVault")}</option>
+            <option value="" disabled={transaction.type === "expense" || transaction.type === "income"}>{transaction.type === "expense" || transaction.type === "income" ? txText("selectVault") : settings("noVault")}</option>
             {vaults.filter((vault) => transaction.type === "income" || !vault.is_locked || vault.id === transaction.vault_id).map((vault) => (
               <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>
             ))}
@@ -1863,11 +1907,13 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             <form id="transaction-add-form" key={addFormKey} onSubmit={(e) => { setFormPrefill(null); void submitTransaction(e); }} className="mt-5 flex flex-col gap-4 w-full max-w-full flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
             <Field label={txText("type")}>
               <select name="type" value={type} onChange={(event) => {
-                setType(event.target.value as "income" | "expense");
+                setType(event.target.value as "income" | "expense" | "transfer");
                 setFormFundingSourceId("");
+                setFormDestinationVaultId("");
               }} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
                 <option value="income">{txText("income")}</option>
                 <option value="expense">{txText("expense")}</option>
+                <option value="transfer">{txText("transfer")}</option>
               </select>
             </Field>
             <Field label={txText("amount")}><Input name="amount" type="number" min="1" step="1" defaultValue={formPrefill?.amount ?? ""} required /></Field>
@@ -1898,14 +1944,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             <Field
               label={txText("sourceVault")}
               hint={
-                type === "expense" || (type === "income" && allocationMode === "single")
+                type === "expense" || type === "transfer" || (type === "income" && allocationMode === "single")
                   ? vaults.length === 0
                     ? txText("recurringVaultNone")
                     : formVaultId
                       ? undefined
                       : type === "expense"
                         ? txText("expenseVaultRequired")
-                        : txText("vaultRequired")
+                        : type === "transfer"
+                          ? txText("transferSourceRequired")
+                          : txText("vaultRequired")
                   : undefined
               }
             >
@@ -1915,15 +1963,42 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 onChange={(event) => {
                   setFormVaultId(event.target.value);
                   setFormFundingSourceId("");
+                  setFormDestinationVaultId("");
                 }}
-                required={type === "expense" || (type === "income" && allocationMode === "single")}
+                required={type === "expense" || type === "transfer" || (type === "income" && allocationMode === "single")}
                 disabled={type === "income" && allocationMode === "auto"}
                 className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
               >
-                <option value="" disabled={type === "expense"}>{type === "expense" || (type === "income" && allocationMode === "single") ? txText("selectVault") : settings("noVault")}</option>
-                {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={type === "expense" && vault.is_locked}>{vaultLabel(vault)}</option>)}
+                <option value="" disabled={type === "expense" || type === "transfer"}>{type === "expense" || type === "transfer" || (type === "income" && allocationMode === "single") ? txText("selectVault") : settings("noVault")}</option>
+                {vaults.map((vault) => <option key={vault.id} value={vault.id} disabled={(type === "expense" || type === "transfer") && vault.is_locked}>{vaultLabel(vault)}</option>)}
               </select>
             </Field>
+            {type === "transfer" && (
+              <Field
+                label={txText("destinationVault")}
+                hint={
+                  vaults.length < 2
+                    ? txText("transferNeedTwoVaults")
+                    : formDestinationVaultId
+                      ? undefined
+                      : txText("transferDestinationRequired")
+                }
+              >
+                <select
+                  name="destinationVaultId"
+                  value={formDestinationVaultId}
+                  onChange={(event) => setFormDestinationVaultId(event.target.value)}
+                  required
+                  className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
+                >
+                  <option value="" disabled>{txText("selectVault")}</option>
+                  {vaults.filter((vault) => vault.id !== formVaultId).map((vault) => (
+                    <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {type !== "transfer" && (
             <Field label={txText("category")}>
               <select key={type} name="categoryId" defaultValue={formPrefill?.categoryId ?? ""} required={categories.some((category) => category.type === type)} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
                 <option value="">{common("none")}</option>
@@ -1934,7 +2009,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 ))}
               </select>
             </Field>
-            {type === "expense" && (
+            )}
+            {(type === "expense" || type === "transfer") && (
               <Field
                 label={txText("fundingSource")}
                 hint={
@@ -2047,6 +2123,13 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                     className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterType === "expense" ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
                   >
                     {txText("filterExpense")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => changeFilterType("transfer")}
+                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${filterType === "transfer" ? "bg-accent text-bg0" : "bg-transparent text-muted hover:bg-surface2 hover:text-ink"}`}
+                  >
+                    {txText("filterTransfer")}
                   </button>
                   <div className="ml-auto flex flex-wrap items-center gap-1 mb-2 sm:mb-0">
                     <button

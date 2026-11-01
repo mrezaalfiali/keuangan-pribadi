@@ -61,6 +61,59 @@ export async function createVault(
   return { ok: true };
 }
 
+/**
+ * Mengganti nama vault.
+ *
+ * `slug` sengaja tidak diubah: ia bagian dari `unique (user_id, slug)` dan
+ * masih dipakai pencocokan achievement berbasis substring — menggantinya hanya
+ * menambah risiko konflik tanpa manfaat tampilan, karena label dibaca dari
+ * `name`.
+ *
+ * `name_key` ikut dikosongkan supaya `resolveLabel` tidak terus membaca nama
+ * lama (baris hasil restore backup membawa `name_key` dan menang atas `name`).
+ *
+ * Duplikat dinilai dari nama baris LAIN (`neq id`), sehingga rename ke nama
+ * sendiri tidak dianggap bertabrakan.
+ */
+export async function updateVault(
+  locale: string,
+  vaultId: string,
+  name: string
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  const trimmed = name.trim();
+  if (!trimmed) return { ok: false, error: "err.vaultName" };
+
+  const { data: others, error: othersError } = await supabase
+    .from("vaults")
+    .select("name")
+    .eq("user_id", user.id)
+    .neq("id", vaultId);
+  if (othersError) return { ok: false, error: "err.generic" };
+
+  if (isDuplicateName((others ?? []).map((row) => row.name), trimmed)) {
+    return { ok: false, error: "vaults.nameTaken" };
+  }
+
+  const { data: updated, error } = await supabase
+    .from("vaults")
+    .update({ name: trimmed, name_key: null })
+    .eq("id", vaultId)
+    .eq("user_id", user.id)
+    .select("id");
+  // Nol baris berarti vault tidak ditemukan/milik orang lain; RLS seharusnya
+  // sudah menolak, tapi pesan generik lebih baik daripada sukses palsu.
+  if (error || !updated?.length) return { ok: false, error: "err.generic" };
+
+  revalidatePath(`/${locale}/vaults`);
+  return { ok: true };
+}
+
 export async function toggleVaultLock(
   locale: string,
   vaultId: string,
@@ -82,10 +135,30 @@ export async function deleteVault(
   vaultId: string
 ): Promise<ActionResult> {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  const { data: vault, error: vaultError } = await supabase
+    .from("vaults")
+    .select("id, is_locked")
+    .eq("id", vaultId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (vaultError) return { ok: false, error: "err.generic" };
+  if (!vault) return { ok: true };
+  // Vault terkunci tidak boleh dihapus: FK transactions.vault_id memakai
+  // on delete set null, sehingga menghapusnya akan mengosongkan vault dari
+  // seluruh baris transaksinya -- uang keluar dari vault terkunci lewat
+  // pintu belakang. Buka kunci dulu sebelum menghapus.
+  if (vault.is_locked) return { ok: false, error: "transactions.lockedError" };
+
   const { error } = await supabase
     .from("vaults")
     .delete()
-    .eq("id", vaultId);
+    .eq("id", vaultId)
+    .eq("user_id", user.id);
   if (error) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/vaults`);

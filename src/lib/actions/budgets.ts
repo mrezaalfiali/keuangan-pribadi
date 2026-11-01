@@ -214,7 +214,7 @@ export async function carryOverBudget(
     // akan menambah sisa lagi ke batas yang sama.
     const { error } = await supabase
       .from("budgets")
-      .update({ limit_amount: baseLimit + leftover, rolled_over_from: source.id })
+      .update({ limit_amount: baseLimit + leftover, rolled_over_from: source.id, leftover_discarded: false })
       .eq("id", existing.id)
       .eq("user_id", user.id)
       .is("rolled_over_from", null);
@@ -232,6 +232,36 @@ export async function carryOverBudget(
     });
     if (error) return { ok: false, error: "err.generic" };
   }
+
+  revalidatePath(`/${locale}/budgets`);
+  return { ok: true };
+}
+
+/**
+ * Menandai sisa periode berakhir sebagai "diputuskan untuk dibiarkan"
+ * (`discarded = true`) atau mengembalikannya ke daftar menunggu keputusan.
+ *
+ * Murni penanda keputusan tampilan: tidak mengubah batas, tidak memindahkan
+ * uang, dan tidak menghalangi "Bawa sisa" -- keputusan bisa dibatalkan
+ * kapan saja lewat toggle yang sama.
+ */
+export async function setLeftoverDiscarded(
+  locale: string,
+  budgetId: string,
+  discarded: boolean
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  const { error } = await supabase
+    .from("budgets")
+    .update({ leftover_discarded: discarded })
+    .eq("id", budgetId)
+    .eq("user_id", user.id);
+  if (error) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/budgets`);
   return { ok: true };

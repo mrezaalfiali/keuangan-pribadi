@@ -30,14 +30,16 @@ import {
   Search,
   History,
   Check,
+  Pencil,
+  X,
 } from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { SocialLinks } from "@/src/components/social-links";
 import { Field, Input } from "@/src/components/ui/input";
 import { Progress } from "@/src/components/ui/progress";
-import { createVault, deleteVault, toggleVaultLock } from "@/src/lib/actions/vaults";
-import { carryOverBudget, copyBudgetPeriod, deleteBudget, saveBudget } from "@/src/lib/actions/budgets";
+import { createVault, deleteVault, toggleVaultLock, updateVault } from "@/src/lib/actions/vaults";
+import { carryOverBudget, copyBudgetPeriod, deleteBudget, saveBudget, setLeftoverDiscarded } from "@/src/lib/actions/budgets";
 import { deleteAllocationRule, saveAllocationRule, setActiveRule } from "@/src/lib/actions/allocation";
 import { saveDisplayName } from "@/src/lib/actions/profile";
 import { exportJson } from "@/src/lib/actions/export";
@@ -123,6 +125,7 @@ export function SupabaseToolsPage({ section }: Props) {
   const nav = useTranslations("nav");
   const categoryName = useTranslations("cat");
   const vaultText = useTranslations("vaults");
+  const txText = useTranslations("transactions");
   const messages = useTranslations();
   const [userId, setUserId] = useState("");
   const [email, setEmail] = useState("");
@@ -160,7 +163,12 @@ export function SupabaseToolsPage({ section }: Props) {
   const [budgetNotice, setBudgetNotice] = useState("");
   const [ruleFormOpen, setRuleFormOpen] = useState(false);
   const [vaultFormOpen, setVaultFormOpen] = useState(false);
+  // Rename inline: satu vault pada satu waktu, nama baru dipegang di state
+  // supaya bisa dibatalkan (Esc) sebelum disimpan ke server.
+  const [editingVaultId, setEditingVaultId] = useState<string | null>(null);
+  const [editingVaultName, setEditingVaultName] = useState("");
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
+  const [showEndedHistory, setShowEndedHistory] = useState(false);
   const [isLargeScreen, setIsLargeScreen] = useState(false);
   const [resetPhrase, setResetPhrase] = useState("");
   const [resetting, setResetting] = useState(false);
@@ -199,7 +207,7 @@ export function SupabaseToolsPage({ section }: Props) {
       const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
       if (failed?.error) throw failed.error;
-      setVaults((vaultResult.data ?? []) as Vault[]);
+      setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setTransactions((txResult.data ?? []) as Transaction[]);
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setCategories(sortByLabel(categories, categoryName, locale));
@@ -303,6 +311,7 @@ function budgetErrorMessage(code: unknown) {
 /** Kode error yang bukan budgets punya pesan sendiri di namespace-nya. */
 function actionErrorMessage(code: unknown) {
   if (code === "vaults.nameTaken") return vaultText("nameTaken");
+  if (code === "transactions.lockedError") return txText("lockedError");
   if (code === "settings.displayNameInvalid") return settings("displayNameInvalid");
   return settings("saveError");
 }
@@ -345,6 +354,21 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
     form.reset();
   }
 
+  /**
+   * Simpan rename inline. Mode edit ditutup hanya kalau server menerima:
+   * kegagalan (mis. nama ganda) membiarkan input terbuka agar bisa dikoreksi,
+   * dan pesannya sendiri tampil lewat `actionErrorMessage` di `completeAction`.
+   */
+  async function submitVaultRename(vaultId: string) {
+    const name = editingVaultName.trim();
+    if (!name) return;
+    const ok = await completeAction(async () => {
+      const result = await updateVault(locale, vaultId, name);
+      if (!result.ok) throw new Error(result.error);
+    });
+    if (ok) setEditingVaultId(null);
+  }
+
   async function submitBudget(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -372,6 +396,9 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
     return budgetLeftover(row.budget.limit_amount, row.spent);
   }
 
+  const pendingEndedBudgets = endedBudgets.filter((row) => leftoverOf(row) > 0 && !carriedOverIds.has(row.budget.id) && !row.budget.leftover_discarded);
+  const visibleEnded = showEndedHistory ? endedBudgets : pendingEndedBudgets;
+
   /**
    * "Buat periode berikutnya": menyalin batas ke periode gaji berikutnya.
    *
@@ -390,6 +417,13 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       const result = await copyBudgetPeriod(locale, budget.id, following);
       if (!result.ok) throw new Error(result.error);
       setBudgetNotice(t("nextPeriodMade", { month: paydayLabel(following, locale) }));
+    });
+  }
+
+  async function updateLeftoverDiscard(row: { budget: Budget; spent: number }, discarded: boolean) {
+    await completeAction(async () => {
+      const result = await setLeftoverDiscarded(locale, row.budget.id, discarded);
+      if (!result.ok) throw new Error(result.error);
     });
   }
 
@@ -634,11 +668,11 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               </form>
             </div>
           </Card>
-          <div className="space-y-3">{vaults.length === 0 ? <Empty text={local("emptyVaults")} /> : vaults.map((vault) => {
+          <div className="space-y-4">{vaults.length === 0 ? <Empty text={local("emptyVaults")} /> : [{ label: vaultText("groupTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) > 0), accent: true }, { label: vaultText("groupNoTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) <= 0), accent: false }].map((group) => group.items.length === 0 ? null : (<div key={group.label} className={`rounded-2xl border p-3 sm:p-4 ${group.accent ? "border-accent/45 bg-accent/[0.06]" : "border-line bg-surface2/60"}`}><h3 className={`mb-3 text-xs font-semibold uppercase tracking-widest ${group.accent ? "text-accent" : "text-muted"}`}>{group.label}</h3><div className="space-y-3">{group.items.map((vault) => {
             const balance = vaultBalances.get(vault.id) ?? 0;
             const target = vault.target_amount ?? 0;
-            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div><h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3><p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="flex gap-1"><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); })} aria-label={vault.is_locked ? t("unlock") : t("lock")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink">{vault.is_locked ? <LockKeyholeOpen size={17} /> : <LockKeyhole size={17} />}</button><button type="button" disabled={saving} onClick={() => { if (window.confirm(t("deleteConfirm"))) void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); }} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={17} /></button></div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}</CardContent></Card>;
-          })}</div>
+            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div>{editingVaultId === vault.id ? <div className="flex items-center gap-1.5"><Input value={editingVaultName} onChange={(event) => setEditingVaultName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitVaultRename(vault.id); } if (event.key === "Escape") setEditingVaultId(null); }} autoFocus maxLength={48} aria-label={t("rename")} className="h-8 w-40 rounded-lg text-sm" /><button type="button" disabled={saving} onClick={() => void submitVaultRename(vault.id)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2"><Check size={15} /></button><button type="button" disabled={saving} onClick={() => setEditingVaultId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2"><X size={15} /></button></div> : <h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3>}<p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="flex gap-1"><button type="button" disabled={saving} onClick={() => { setEditingVaultId(vault.id); setEditingVaultName(vault.name ?? scopeOptionLabel(vault)); }} aria-label={t("rename")} title={t("rename")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink"><Pencil size={17} /></button><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); })} aria-label={vault.is_locked ? t("unlock") : t("lock")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink">{vault.is_locked ? <LockKeyholeOpen size={17} /> : <LockKeyhole size={17} />}</button><button type="button" disabled={saving} onClick={() => { if (window.confirm(t("deleteConfirm"))) void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); }} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={17} /></button></div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}</CardContent></Card>;
+          })}</div></div>))}</div>
         </section>}
 
         {section === "budgets" && <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
@@ -699,17 +733,18 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               return <li key={row.budget.id} className="flex items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale, Number(today.slice(0, 4)))} · {money(row.budget.limit_amount, locale)}</p></div><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, row.budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="shrink-0 rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={16} /></button></li>;
             })}</ul></CardContent></Card>}
 
-            <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink">{t("endedPeriods")}</h2><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <ul className="mt-3 divide-y divide-line">{endedBudgets.map((row) => {
+            <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink">{t("endedPeriods")}</h2><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <>{visibleEnded.length === 0 ? <p className="mt-4 text-sm text-muted">{t("allResolved")}</p> : <ul className="mt-3 divide-y divide-line">{visibleEnded.map((row) => {
               const { budget, spent } = row;
               const leftover = leftoverOf(row);
               const alreadyCarried = carriedOverIds.has(budget.id);
+              const discarded = budget.leftover_discarded;
               const target = budget.scope === "vault"
                 ? vaults.find((vault) => vault.id === budget.scope_id)
                 : categories.find((category) => category.id === budget.scope_id);
               const label = target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
               const following = nextPeriod({ startsOn: budget.starts_on, endsOn: budget.ends_on });
-              return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}</div><button type="button" disabled={saving || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOver")} className="shrink-0 rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button></div></li>;
-            })}</ul>}</CardContent></Card>
+              return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</div><div className="flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOver")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
+            })}</ul>}{endedBudgets.length > pendingEndedBudgets.length && <button type="button" onClick={() => setShowEndedHistory(!showEndedHistory)} aria-expanded={showEndedHistory} className="mt-3 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors">{showEndedHistory ? t("hideHistory") : t("showHistory")}</button>}</>}</CardContent></Card>
           </div>
         </section>}
 

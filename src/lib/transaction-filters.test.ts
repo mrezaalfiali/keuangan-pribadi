@@ -33,6 +33,24 @@ const transactions: Row[] = [
     vault_id: null,
     note: "Monthly salary",
   },
+  {
+    type: "transfer",
+    date: "2026-10-20",
+    amount: 75_000,
+    category_id: null,
+    funding_source_id: "bonus",
+    vault_id: "daily",
+    note: "Move to savings",
+  },
+  {
+    type: "transfer",
+    date: "2026-10-20",
+    amount: 75_000,
+    category_id: null,
+    funding_source_id: "bonus",
+    vault_id: "savings",
+    note: "Move from daily",
+  },
 ];
 
 const defaults: TransactionFilters = {
@@ -69,6 +87,19 @@ describe("filterTransactions", () => {
 
   it("searches searchable text case-insensitively", () => {
     expect(select({ search: "LUNCH" })).toEqual([transactions[0]]);
+  });
+
+  it("filters transfers on their own without mixing income or expense", () => {
+    expect(select({ type: "transfer" })).toEqual([transactions[3], transactions[4]]);
+    expect(select({ type: "expense" })).toEqual([transactions[0], transactions[1]]);
+    expect(select({ type: "income" })).toEqual([transactions[2]]);
+  });
+
+  it("keeps both transfer legs when filtering by funding source", () => {
+    expect(select({ type: "transfer", fundingSourceId: "bonus" })).toEqual([
+      transactions[3],
+      transactions[4],
+    ]);
   });
 
   it("returns all rows when no filters are active", () => {

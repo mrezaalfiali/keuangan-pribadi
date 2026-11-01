@@ -84,6 +84,7 @@ export interface Budget {
   limit_amount: number;
   alert_threshold: number;
   rolled_over_from: string | null;
+  leftover_discarded: boolean;
 }
 
 export interface RecurringTransaction {

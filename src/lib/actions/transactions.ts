@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import { distributeAllocation, resolveIncomeAllocation, validateSlots, type AllocationMode } from "@/src/lib/allocation";
 import { todayISO } from "@/src/lib/utils";
-import { vaultBalanceDelta, expenseVaultError } from "@/src/lib/vault-ledger";
+import { deleteReducesLockedVaultError, vaultBalanceDelta, expenseVaultError } from "@/src/lib/vault-ledger";
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
 import type { AllocationSlot, Transaction } from "../types";
@@ -464,11 +464,43 @@ export async function deleteTransaction(
 
   const { data: tx, error: txError } = await supabase
     .from("transactions")
-    .select("id, user_id, group_id")
+    .select("id, user_id, group_id, type, vault_id, transfer_direction")
     .eq("id", txId)
     .eq("user_id", user.id)
     .maybeSingle();
   if (txError || !tx) return { ok: false, error: "err.generic" };
+
+  // Hapus membuat saldo vault terkunci berkurang kalau barisnya terhitung
+  // uang masuk (income / transfer masuk). Kumpulkan dulu semua baris yang
+  // akan ikut terhapus (satu baris atau satu group split/transfer), lalu
+  // tolak seluruhnya bila ada yang menempel pada vault terkunci.
+  let rows = [
+    { type: tx.type, vault_id: tx.vault_id, transfer_direction: tx.transfer_direction },
+  ];
+  if (tx.group_id) {
+    const { data: groupRows, error: groupError } = await supabase
+      .from("transactions")
+      .select("type, vault_id, transfer_direction")
+      .eq("user_id", user.id)
+      .eq("group_id", tx.group_id);
+    if (groupError || !groupRows) return { ok: false, error: "err.generic" };
+    rows = groupRows;
+  }
+  const vaultIds = rows.map((row) => row.vault_id).filter((id) => id !== null);
+  if (vaultIds.length > 0) {
+    const { data: lockedVaults, error: lockedVaultError } = await supabase
+      .from("vaults")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("is_locked", true)
+      .in("id", vaultIds);
+    if (lockedVaultError) return { ok: false, error: "err.generic" };
+    const guard = deleteReducesLockedVaultError(
+      rows,
+      (lockedVaults ?? []).map((vault) => vault.id)
+    );
+    if (guard) return { ok: false, error: guard };
+  }
 
   if (tx.group_id) {
     const { error } = await supabase
