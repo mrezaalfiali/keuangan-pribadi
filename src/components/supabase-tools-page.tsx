@@ -422,6 +422,14 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
   }
 
   async function updateLeftoverDiscard(row: { budget: Budget; spent: number }, discarded: boolean) {
+    if (discarded && budgetState(row.budget, todayISO()) === "active") {
+      const leftover = budgetLeftover(row.budget.limit_amount, row.spent);
+      const proceed = window.confirm(t("closeLeftoverConfirm", {
+        leftover: money(leftover, locale),
+        spent: money(row.spent, locale),
+      }));
+      if (!proceed) return;
+    }
     await completeAction(async () => {
       const result = await setLeftoverDiscarded(locale, row.budget.id, discarded);
       if (!result.ok) throw new Error(result.error);
@@ -433,8 +441,20 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
     if (leftover <= 0) return;
     const target = nextPeriod({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on });
     if (!target) return;
+    const existing = budgets.find((other) =>
+      other.scope === row.budget.scope
+        && other.scope_id === row.budget.scope_id
+        && other.starts_on === target.startsOn
+    );
+    const baseLimit = existing ? existing.limit_amount : row.budget.limit_amount;
     setNotice("");
-    if (!window.confirm(t("budgetCarryOverConfirm", { leftover: money(leftover, locale), from: row.budget.ends_on, to: target.endsOn }))) {
+    if (!window.confirm(t("budgetCarryOverConfirm", {
+      leftover: money(leftover, locale),
+      from: row.budget.ends_on,
+      to: target.endsOn,
+      before: money(baseLimit, locale),
+      after: money(baseLimit + leftover, locale),
+    }))) {
       return;
     }
     await completeAction(async () => {
@@ -746,7 +766,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 : categories.find((category) => category.id === budget.scope_id);
               const label = target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
               const following = nextPeriod({ startsOn: budget.starts_on, endsOn: budget.ends_on });
-              return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</div><div className="flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOver")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
+              return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</div><div className="flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
             })}</ul>}{endedBudgets.length > pendingEndedBudgets.length && <button type="button" onClick={() => setShowEndedHistory(!showEndedHistory)} aria-expanded={showEndedHistory} className="mt-3 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors">{showEndedHistory ? t("hideHistory") : t("showHistory")}</button>}</>}</CardContent></Card>
           </div>
         </section>}

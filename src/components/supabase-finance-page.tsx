@@ -852,9 +852,14 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     if (code === "transactions.noSource") return emptySourceHint;
     if (code === "transactions.sourceNotInVault") return txText("sourceNotInVault");
     if (code === "transactions.insufficientSource") return txText("insufficientSource");
+    if (code === "transactions.insufficient") return txText("insufficient");
     if (code === "transactions.vaultRequired") return txText("vaultRequired");
     if (code === "transactions.allocationRuleRequired") return txText("allocationRuleRequired");
     if (code === "transactions.expenseVaultRequired") return txText("expenseVaultRequired");
+    if (code === "err.amount") return txText("invalidAmount");
+    if (code === "err.auth") return txText("authError");
+    if (code === "err.category") return txText("categoryInvalid");
+    console.error("Unknown transaction error:", code);
     return settings("saveError");
   }
 
@@ -948,12 +953,18 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const amount = Number(data.get("amount"));
+    const rawAmount = Number(data.get("amount"));
+    const amount = Math.trunc(rawAmount);
     const date = String(data.get("date") ?? "");
     const vaultId = String(data.get("vaultId") ?? "") || null;
     const destinationVaultId = String(data.get("destinationVaultId") ?? "") || null;
     const categoryId = String(data.get("categoryId") ?? "") || null;
     const fundingSourceId = String(data.get("fundingSourceId") ?? "") || null;
+    // Sama dengan jalur edit: nominal tidak valid ditahan sebelum request keluar.
+    if (!Number.isSafeInteger(rawAmount) || amount <= 0 || amount > 2_147_483_647) {
+      setFormError(txText("invalidAmount"));
+      return;
+    }
     // Blocked before the request goes out; the server repeats the check.
     if (type === "expense" && !vaultId) {
       setFormError(txText("expenseVaultRequired"));
