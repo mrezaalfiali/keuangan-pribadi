@@ -39,7 +39,7 @@ export async function checkExpenseBudget(
 ): Promise<BudgetGuardResult> {
   const { data: budgets, error: budgetError } = await supabase
     .from("budgets")
-    .select("id, scope, scope_id, limit_amount, starts_on, ends_on")
+    .select("id, scope, scope_id, limit_amount, starts_on, ends_on, leftover_discarded")
     .eq("user_id", userId)
     .lte("starts_on", candidate.date)
     .gte("ends_on", candidate.date);
@@ -80,6 +80,7 @@ export async function checkExpenseBudget(
       limit_amount: number;
       starts_on: string;
       ends_on: string;
+      leftover_discarded?: boolean;
     }[],
     candidate,
     excludeTransactionId

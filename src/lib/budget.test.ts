@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  budgetDisplayStatus,
+  budgetEffectiveLimit,
   budgetLeftover,
   budgetRatio,
   budgetSpend,
@@ -137,6 +139,60 @@ describe("budgetRatio", () => {
 
   it("nol saat batas tidak valid", () => {
     expect(budgetRatio(10, 0)).toBe(0);
+  });
+});
+
+describe("budgetEffectiveLimit", () => {
+  it("batas asli saat sisa belum ditutup", () => {
+    expect(budgetEffectiveLimit({ limit_amount: 500_000 }, 200_000)).toBe(500_000);
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000, leftover_discarded: false }, 200_000)
+    ).toBe(500_000);
+  });
+
+  it("turun ke angka terpakai saat sisa ditutup", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000, leftover_discarded: true }, 200_000)
+    ).toBe(200_000);
+  });
+
+  it("nol saat sisa ditutup sebelum ada yang terpakai", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000, leftover_discarded: true }, 0)
+    ).toBe(0);
+  });
+
+  it("tidak dinaikkan melewati batas asli walau pemakaian sudah kelewat", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000, leftover_discarded: true }, 600_000)
+    ).toBe(500_000);
+  });
+});
+
+describe("budgetDisplayStatus", () => {
+  const budget = { limit_amount: 1_000_000, alert_threshold: 0.8 };
+
+  it("mengikuti budgetStatus selama sisa belum ditutup", () => {
+    expect(budgetDisplayStatus(budget, 500_000)).toBe("ok");
+    expect(budgetDisplayStatus(budget, 800_000)).toBe("warning");
+    expect(budgetDisplayStatus(budget, 1_000_000)).toBe("full");
+    expect(budgetDisplayStatus(budget, 1_000_001)).toBe("exceeded");
+  });
+
+  it("seketika penuh begitu sisa ditutup, berapa pun terpakainya", () => {
+    const closed = { ...budget, leftover_discarded: true };
+    expect(budgetDisplayStatus(closed, 200_000)).toBe("full");
+    expect(budgetDisplayStatus(closed, 1_000_000)).toBe("full");
+  });
+
+  it("tetap penuh walau belum ada yang terpakai", () => {
+    expect(budgetDisplayStatus({ ...budget, leftover_discarded: true }, 0)).toBe("full");
+  });
+
+  it("menghormati threshold khusus", () => {
+    expect(budgetDisplayStatus({ limit_amount: 1_000_000, alert_threshold: 0.5 }, 500_000)).toBe(
+      "warning"
+    );
   });
 });
 
@@ -476,6 +532,31 @@ describe("findExceededBudget", () => {
     ).toBeNull();
     expect(findExceededBudget([], [categoryBudget], { ...candidate, amount: NaN })).toBeNull();
     expect(findExceededBudget([], [categoryBudget], { ...candidate, amount: 0 })).toBeNull();
+  });
+
+  it("anggaran sisa ditutup menolak pengeluaran yang masih muat di batas asli", () => {
+    const rows = [tx({ amount: 200_000, category_id: "cat-food", vault_id: "vault-a" })];
+    const closed = { ...categoryBudget, leftover_discarded: true };
+    // Dengan sisa 300.000 masih terbuka, nominal ini sah.
+    expect(findExceededBudget(rows, [categoryBudget], { ...candidate, amount: 300_000 })).toBeNull();
+    const conflict = findExceededBudget(rows, [closed], { ...candidate, amount: 300_000 });
+    expect(conflict?.spent).toBe(200_000);
+    expect(conflict?.remaining).toBe(0);
+    expect(conflict?.projected).toBe(500_000);
+  });
+
+  it("anggaran sisa ditutup yang belum terpakai menolak semua nominal", () => {
+    const closed = { ...categoryBudget, leftover_discarded: true };
+    const conflict = findExceededBudget([], [closed], candidate);
+    expect(conflict?.spent).toBe(0);
+    expect(conflict?.remaining).toBe(0);
+    expect(conflict?.projected).toBe(150_000);
+  });
+
+  it("anggaran sisa dibuka kembali berlaku seperti biasa", () => {
+    const rows = [tx({ amount: 200_000, category_id: "cat-food", vault_id: "vault-a" })];
+    const reopened = { ...categoryBudget, leftover_discarded: false };
+    expect(findExceededBudget(rows, [reopened], { ...candidate, amount: 300_000 })).toBeNull();
   });
 });
 

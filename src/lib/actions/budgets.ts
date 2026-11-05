@@ -142,7 +142,7 @@ export async function carryOverBudget(
 
   const { data: source, error: sourceError } = await supabase
     .from("budgets")
-    .select("id, scope, scope_id, starts_on, ends_on, limit_amount, alert_threshold")
+    .select("id, scope, scope_id, starts_on, ends_on, limit_amount, alert_threshold, leftover_discarded")
     .eq("id", budgetId)
     .eq("user_id", user.id)
     .single();
@@ -180,7 +180,11 @@ export async function carryOverBudget(
     }
   );
 
-  const leftover = budgetLeftover(source.limit_amount, spentTotal);
+  // Sisa yang sudah ditutup tidak boleh terbawa: kuotanya sudah dianggap
+  // dialihkan, jadi periode berikutnya hanya menerima batas dasarnya saja.
+  const leftover = source.leftover_discarded
+    ? 0
+    : budgetLeftover(source.limit_amount, spentTotal);
   if (leftover <= 0) return { ok: false, error: "err.noLeftover" };
 
   const { data: alreadyCarried } = await supabase
@@ -238,12 +242,15 @@ export async function carryOverBudget(
 }
 
 /**
- * Menandai sisa periode berakhir sebagai "diputuskan untuk dibiarkan"
- * (`discarded = true`) atau mengembalikannya ke daftar menunggu keputusan.
+ * Menutup sisa anggaran (`discarded = true`) atau membukanya kembali.
  *
- * Murni penanda keputusan tampilan: tidak mengubah batas, tidak memindahkan
- * uang, dan tidak menghalangi "Bawa sisa" -- keputusan bisa dibatalkan
- * kapan saja lewat toggle yang sama.
+ * Untuk periode berakhir artinya sisa tidak dibawa ke periode berikutnya. Untuk
+ * anggaran berjalan artinya sisa dicabut sekarang: batas efektif turun ke angka
+ * terpakai, statusnya jadi "penuh", dan pengeluaran baru ditolak guard anggaran.
+ *
+ * Tidak memindahkan uang -- transfer tetap aksi terpisah di form Transfer,
+ * dan tidak mengubah `limit_amount` -- batas asli dipakai lagi saat "Batal tutup"
+ * atau saat periode berikutnya dibuat.
  */
 export async function setLeftoverDiscarded(
   locale: string,
@@ -264,6 +271,7 @@ export async function setLeftoverDiscarded(
   if (error) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/budgets`);
+  revalidatePath(`/${locale}/dashboard`);
   return { ok: true };
 }
 

@@ -23,7 +23,7 @@ import {
 import { resolveLabel, humanizeSlug, sortByLabel } from "@/src/lib/labels";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
-import { budgetSpend, budgetState, budgetStatus } from "@/src/lib/budget";
+import { budgetDisplayStatus, budgetEffectiveLimit, budgetSpend, budgetState } from "@/src/lib/budget";
 import { filterTransactions } from "@/src/lib/transaction-filters";
 import { incomeLockedVaultError } from "@/src/lib/vault-ledger";
 import { todayJakartaISO } from "@/src/lib/recurring";
@@ -468,7 +468,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const budgetAlerts = budgets.flatMap((budget) => {
     if (budgetState(budget, todayISO()) !== "active") return [];
     const spent = budgetSpend(transactions, budget);
-    const status = budgetStatus(spent, budget.limit_amount, Number(budget.alert_threshold));
+    const status = budgetDisplayStatus(budget, spent);
     if (status === "ok") return [];
     const targetLabel = budget.scope === "vault"
       ? vaultLabel(vaults.find((vault) => vault.id === budget.scope_id))
@@ -478,7 +478,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       status,
       label: targetLabel ?? dashboard(budget.scope === "vault" ? "budgetVault" : "budgetCategory"),
       spent,
-      limit: budget.limit_amount,
+      limit: budgetEffectiveLimit(budget, spent),
     }];
   });
   const onboardingSteps = getOnboardingSteps(transactions, vaults, budgets, todayJakartaISO());

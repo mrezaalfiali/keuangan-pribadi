@@ -45,13 +45,35 @@ export interface ExpenseCandidate {
 }
 
 export interface BudgetConflict {
-  budget: Pick<Budget, "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on">;
+  budget: Pick<Budget, "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on"> &
+    Partial<Pick<Budget, "leftover_discarded">>;
   /** Pemakaian sebelum transaksi baru, tanpa baris yang sedang diedit. */
   spent: number;
   /** Sisa sebelum transaksi baru; tidak pernah negatif. */
   remaining: number;
   /** Pemakaian setelah transaksi baru ditambahkan. */
   projected: number;
+}
+
+/**
+ * Batas efektif sebuah anggaran.
+ *
+ * `leftover_discarded` mencabut sisa anggaran: batas efektif turun ke angka yang
+ * sudah terpakai, sehingga statusnya menjadi "penuh" dan pengeluaran baru dianggap
+ * melebihi batas. Uangnya memang sudah dipindahkan lewat aksi transfer terpisah —
+ * transfer sendiri tidak pernah dihitung sebagai belanja (lihat `budgetSpend`).
+ *
+ * Untuk anggaran yang belum ada terpakai sama sekali hasilnya 0: seluruh kuota
+ * sudah dialihkan, tidak ada yang boleh dibelanjakan lagi. Angka yang sudah
+ * kelewat batas tidak ditarik mundur, jadi batas efektif tidak pernah lebih besar
+ * dari `limit_amount` maupun dari `spent`.
+ */
+export function budgetEffectiveLimit(
+  budget: Pick<Budget, "limit_amount"> & Partial<Pick<Budget, "leftover_discarded">>,
+  spent: number
+): number {
+  if (!budget.leftover_discarded) return budget.limit_amount;
+  return Math.max(0, Math.min(budget.limit_amount, Math.trunc(spent)));
 }
 
 /**
@@ -63,14 +85,16 @@ export interface BudgetConflict {
  * lamanya tidak dihitung dua kali.
  *
  * Tepat sama dengan batas masih dianggap aman; hanya nilai di atas batas yang
- * mengembalikan konflik.
+ * mengembalikan konflik. "Batas" di sini batas efektif: anggaran yang sisa-
+ * nya sudah ditutup menolak begitu pemakaiannya naik di atas angka terpakai.
  */
 export function findExceededBudget(
   transactions: readonly BudgetTransaction[],
-  budgets: readonly Pick<
+  budgets: readonly (Pick<
     Budget,
     "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on"
-  >[],
+  > &
+    Partial<Pick<Budget, "leftover_discarded">>)[],
   candidate: ExpenseCandidate,
   excludeTransactionId?: number
 ): BudgetConflict | null {
@@ -94,16 +118,21 @@ export function findExceededBudget(
       ),
       budget
     );
+    const effectiveLimit = budgetEffectiveLimit(budget, spent);
     const projected = spent + amount;
-    if (projected <= budget.limit_amount) continue;
+    if (projected <= effectiveLimit) continue;
 
     const conflict: BudgetConflict = {
       budget,
       spent,
-      remaining: budgetLeftover(budget.limit_amount, spent),
+      remaining: budgetLeftover(effectiveLimit, spent),
       projected,
     };
-    if (!worst || conflict.projected - conflict.budget.limit_amount > worst.projected - worst.budget.limit_amount) {
+    if (
+      !worst
+      || conflict.projected - effectiveLimit
+        > worst.projected - budgetEffectiveLimit(worst.budget, worst.spent)
+    ) {
       worst = conflict;
     }
   }
@@ -130,12 +159,28 @@ export function budgetStatus(
   return "ok";
 }
 
+/**
+ * Status yang ditampilkan kartu anggaran, memperhitungkan sisa yang sudah ditutup.
+ *
+ * Sisa yang dicabut membuat anggaran seketika terlihat "penuh" berapa pun angka
+ * terpakainya, termasuk nol — kuotanya sudah dialihkan habis, tidak ada sisa yang
+ * menunggu. `budgetStatus` sendiri tidak diubah karena batas nol tetap dimaknai
+ * aman di sana (sudah dikunci test).
+ */
+export function budgetDisplayStatus(
+  budget: Pick<Budget, "limit_amount" | "alert_threshold"> &
+    Partial<Pick<Budget, "leftover_discarded">>,
+  spent: number
+): BudgetStatus {
+  if (budget.leftover_discarded) return "full";
+  return budgetStatus(spent, budget.limit_amount, Number(budget.alert_threshold));
+}
+
 /** Skema warna progress bar + teks status, dipakai oleh kartu anggaran. */
 export function budgetRatio(spent: number, limit: number): number {
   if (limit <= 0) return 0;
   return spent / limit;
 }
-
 export const BUDGET_SCOPES: BudgetScope[] = ["category", "vault"];
 
 const DAY_MS = 86_400_000;
