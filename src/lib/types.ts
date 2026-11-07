@@ -87,6 +87,23 @@ export interface Budget {
   leftover_discarded: boolean;
 }
 
+/**
+ * Pinjaman antar anggaran pada periode yang sama. `limit_amount` kedua
+ * pihak tidak berubah; yang berubah hanya batas efektif baris terkait.
+ * `transaction_id` menautkan pinjaman ke transaksi yang memicunya --
+ * null sampai transaksi tersimpan; cascade mengembalikan sisa pemberi
+ * saat transaksi dihapus.
+ */
+export interface BudgetBorrow {
+  id: string;
+  user_id: string;
+  from_budget_id: string;
+  to_budget_id: string;
+  transaction_id: number | null;
+  amount: number;
+  created_at: string;
+}
+
 export interface RecurringTransaction {
   id: string;
   user_id: string;

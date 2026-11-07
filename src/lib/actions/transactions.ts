@@ -6,6 +6,13 @@ import { distributeAllocation, resolveIncomeAllocation, validateSlots, type Allo
 import { todayISO } from "@/src/lib/utils";
 import { deleteReducesLockedVaultError, vaultBalanceDelta, expenseVaultError } from "@/src/lib/vault-ledger";
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
+import {
+  aggregateBorrows,
+  budgetSpend,
+  planBorrowShrink,
+  requiredBorrowTotal,
+  type BudgetBorrowRow,
+} from "@/src/lib/budget";
 import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
 import type { AllocationSlot, Transaction } from "../types";
 
@@ -15,7 +22,14 @@ export interface TxResult {
   points?: number;
   unlockedAchievements?: Array<{ nameKey: string; points: number }>;
   rewardError?: boolean;
-  budget?: { scope: "category" | "vault"; remaining: number };
+  budget?: {
+    scope: "category" | "vault";
+    remaining: number;
+    /** Baris anggaran yang tertolak; UI memakainya sebagai peminjam. */
+    id: string;
+    /** Kekurangan setelah sisa dipakai; dasar nominal pinjaman. */
+    shortfall: number;
+  };
 }
 
 interface RewardPayload {
@@ -59,6 +73,14 @@ export async function addTransaction(
      * `single` mengirim seluruh nominal ke `vaultId`.
      */
     allocationMode?: AllocationMode | null;
+  },
+  options?: {
+    /**
+     * Id `budget_borrows` yang menutup kekurangan anggaran transaksi ini.
+     * Ditautkan ke baris transaksi setelah insert berhasil supaya menghapus
+     * transaksi otomatis mengembalikan sisa pemberi (FK cascade).
+     */
+    borrowIds?: string[];
   }
 ): Promise<TxResult> {
   const supabase = await createClient();
@@ -238,8 +260,28 @@ export async function addTransaction(
     ]);
     if (error) return { ok: false, error: "err.generic" };
   } else {
-    const { error } = await supabase.from("transactions").insert(base);
+    const { data: inserted, error } = await supabase
+      .from("transactions")
+      .insert(base)
+      .select("id")
+      .single();
     if (error) return { ok: false, error: "err.generic" };
+
+    // Tautkan pinjaman yang menutup kekurangan anggaran. Gagal menaut
+    // tidak membatalkan transaksi yang sudah tersimpan -- pinjaman tetap
+    // tercatat dan masih bisa dibatalkan manual dari halaman Anggaran.
+    const borrowIds = options?.borrowIds;
+    if (input.type === "expense" && borrowIds?.length && inserted) {
+      const { error: linkError } = await supabase
+        .from("budget_borrows")
+        .update({ transaction_id: inserted.id })
+        .in("id", borrowIds)
+        .eq("user_id", user.id)
+        .is("transaction_id", null);
+      if (linkError) {
+        console.error("Supabase budget borrow link failed.", linkError);
+      }
+    }
   }
 
   const { data: rewardData, error: rewardError } = await supabase.rpc(
@@ -524,6 +566,123 @@ export async function deleteTransaction(
   return { ok: true };
 }
 
+/**
+ * Memangkas pinjaman anggaran yang menempel pada transaksi pengeluaran
+ * setelah nominalnya diedit menjadi lebih kecil.
+ *
+ * Guard pre-edit sudah memastikan transaksi muat dengan pinjaman yang ada;
+ * fungsi ini hanya menghitung berapa sisa pinjaman yang benar-benar masih
+ * dibutuhkan (`requiredBorrowTotal`), lalu memangkas kelebihannya
+ * (`planBorrowShrink`) agar sisa anggaran pemberi pulih.
+ */
+async function shrinkTransactionBorrows(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+  txId: number
+): Promise<void> {
+  try {
+    const { data: txBorrows, error: txBorrowsError } = await supabase
+      .from("budget_borrows")
+      .select("id, from_budget_id, to_budget_id, amount")
+      .eq("user_id", userId)
+      .eq("transaction_id", txId);
+    if (txBorrowsError) {
+      console.error("Supabase load transaction borrows failed during shrink.", txBorrowsError);
+      return;
+    }
+    if (!txBorrows || txBorrows.length === 0) return;
+
+    const toBudgetIds = Array.from(new Set(txBorrows.map((b) => b.to_budget_id)));
+    if (toBudgetIds.length === 0) return;
+
+    const { data: budgets, error: budgetsError } = await supabase
+      .from("budgets")
+      .select("id, scope, scope_id, limit_amount, starts_on, ends_on, leftover_discarded")
+      .eq("user_id", userId)
+      .in("id", toBudgetIds);
+    if (budgetsError) {
+      console.error("Supabase load budgets failed during shrink.", budgetsError);
+      return;
+    }
+    if (!budgets || budgets.length === 0) return;
+
+    const { data: allBorrows, error: allBorrowsError } = await supabase
+      .from("budget_borrows")
+      .select("from_budget_id, to_budget_id, amount")
+      .eq("user_id", userId);
+    if (allBorrowsError) {
+      console.error("Supabase load all borrows failed during shrink.", allBorrowsError);
+      return;
+    }
+    const totals = aggregateBorrows((allBorrows ?? []) as BudgetBorrowRow[]);
+
+    const minStarts = budgets.reduce(
+      (min, b) => (b.starts_on < min ? b.starts_on : min),
+      budgets[0].starts_on
+    );
+    const maxEnds = budgets.reduce(
+      (max, b) => (b.ends_on > max ? b.ends_on : max),
+      budgets[0].ends_on
+    );
+
+    const { data: expenseTxs, error: expenseError } = await supabase
+      .from("transactions")
+      .select("type, amount, category_id, vault_id, date")
+      .eq("user_id", userId)
+      .eq("type", "expense")
+      .gte("date", minStarts)
+      .lte("date", maxEnds);
+    if (expenseError) {
+      console.error("Supabase load expenses failed during shrink.", expenseError);
+      return;
+    }
+
+    const txRows = (expenseTxs ?? []) as Pick<
+      Transaction,
+      "type" | "amount" | "category_id" | "vault_id" | "date"
+    >[];
+
+    const needs = new Map<string, number>();
+    for (const b of budgets) {
+      const spent = budgetSpend(txRows, b);
+      const linkedTotal = txBorrows
+        .filter((row) => row.to_budget_id === b.id)
+        .reduce((sum, row) => sum + row.amount, 0);
+      const need = requiredBorrowTotal(b, spent, totals.get(b.id), linkedTotal);
+      needs.set(b.id, need);
+    }
+
+    const plan = planBorrowShrink(
+      txBorrows as (BudgetBorrowRow & { id: string })[],
+      needs
+    );
+
+    if (plan.deleteIds.length > 0) {
+      const { error: delError } = await supabase
+        .from("budget_borrows")
+        .delete()
+        .eq("user_id", userId)
+        .in("id", plan.deleteIds);
+      if (delError) {
+        console.error("Supabase delete borrows failed during shrink.", delError);
+      }
+    }
+
+    for (const update of plan.updates) {
+      const { error: updateError } = await supabase
+        .from("budget_borrows")
+        .update({ amount: update.amount })
+        .eq("id", update.id)
+        .eq("user_id", userId);
+      if (updateError) {
+        console.error("Supabase update borrow failed during shrink.", updateError);
+      }
+    }
+  } catch (err) {
+    console.error("Unexpected error in shrinkTransactionBorrows.", err);
+  }
+}
+
 export async function editTransaction(
   locale: string,
   input: {
@@ -608,6 +767,10 @@ export async function editTransaction(
       return { ok: false, error: error.message };
     }
     return { ok: false, error: "err.generic" };
+  }
+
+  if (existing.type === "expense") {
+    await shrinkTransactionBorrows(supabase, user.id, input.id);
   }
 
   for (const section of ["dashboard", "transactions", "vaults", "allocation", "budgets", "rewards"]) {

@@ -1,4 +1,4 @@
-import type { Budget, BudgetScope, Transaction } from "./types";
+import type { Budget, BudgetBorrow, BudgetScope, Transaction } from "./types";
 import { todayISO } from "./utils";
 
 /**
@@ -18,7 +18,7 @@ import { todayISO } from "./utils";
  * akan membuat batas "makan bulanan" ikut berkurang setiap kali uang pindah.
  */
 export function budgetSpend(
-  transactions: Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date">[],
+  transactions: readonly Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date">[],
   budget: Pick<Budget, "scope" | "scope_id" | "starts_on" | "ends_on">
 ): number {
   const { starts_on: startsOn, ends_on: endsOn } = budget;
@@ -53,10 +53,45 @@ export interface BudgetConflict {
   remaining: number;
   /** Pemakaian setelah transaksi baru ditambahkan. */
   projected: number;
+  /** Batas efektif (sudah memperhitungkan pinjaman) saat konflik terjadi. */
+  effectiveLimit: number;
+}
+
+/** Jumlah pinjaman yang menempel pada satu baris anggaran. */
+export interface BorrowTotals {
+  borrowedIn: number;
+  borrowedOut: number;
+}
+
+/** Baris `budget_borrows` -- hanya kolom yang dibutuhkan perhitungan. */
+export type BudgetBorrowRow = Pick<BudgetBorrow, "from_budget_id" | "to_budget_id" | "amount">;
+
+/**
+ * Menjumlahkan pinjaman per baris anggaran: keluar dari pemberi,
+ * masuk ke peminjam. Dipakai guard, UI, dan aksi server supaya semua
+ * membaca angka efektif yang sama.
+ */
+export function aggregateBorrows(
+  borrows: readonly BudgetBorrowRow[]
+): Map<string, BorrowTotals> {
+  const totals = new Map<string, BorrowTotals>();
+  for (const row of borrows) {
+    const from = totals.get(row.from_budget_id) ?? { borrowedIn: 0, borrowedOut: 0 };
+    from.borrowedOut += row.amount;
+    totals.set(row.from_budget_id, from);
+    const to = totals.get(row.to_budget_id) ?? { borrowedIn: 0, borrowedOut: 0 };
+    to.borrowedIn += row.amount;
+    totals.set(row.to_budget_id, to);
+  }
+  return totals;
 }
 
 /**
  * Batas efektif sebuah anggaran.
+ *
+ * Pinjaman tidak mengubah `limit_amount` -- angka rencana yang dilihat
+ * pemakai tetap apa adanya. Yang bergeser hanya kapasitas belanja baris
+ * periode ini: `limit_amount + dipinjam masuk - dipinjam keluar`.
  *
  * `leftover_discarded` mencabut sisa anggaran: batas efektif turun ke angka yang
  * sudah terpakai, sehingga statusnya menjadi "penuh" dan pengeluaran baru dianggap
@@ -66,14 +101,88 @@ export interface BudgetConflict {
  * Untuk anggaran yang belum ada terpakai sama sekali hasilnya 0: seluruh kuota
  * sudah dialihkan, tidak ada yang boleh dibelanjakan lagi. Angka yang sudah
  * kelewat batas tidak ditarik mundur, jadi batas efektif tidak pernah lebih besar
- * dari `limit_amount` maupun dari `spent`.
+ * dari `limit_amount` maupun dari `spent` saat sisa ditutup.
  */
 export function budgetEffectiveLimit(
   budget: Pick<Budget, "limit_amount"> & Partial<Pick<Budget, "leftover_discarded">>,
-  spent: number
+  spent: number,
+  borrows?: BorrowTotals
 ): number {
-  if (!budget.leftover_discarded) return budget.limit_amount;
-  return Math.max(0, Math.min(budget.limit_amount, Math.trunc(spent)));
+  const base = Math.max(
+    0,
+    budget.limit_amount + (borrows?.borrowedIn ?? 0) - (borrows?.borrowedOut ?? 0)
+  );
+  if (!budget.leftover_discarded) return base;
+  return Math.max(0, Math.min(base, Math.trunc(spent)));
+}
+
+/**
+ * Pinjaman minimum dari transaksi ini yang harus tetap terpasang pada sebuah
+ * anggaran peminjam setelah transaksi diedit, supaya guard pengeluaran tetap
+ * lolos dengan batas efektif baru.
+ *
+ * Identitasnya: guard lolos bila `spent <= effectiveLimit`, dan batas efektif
+ * memuat `+ borrowedIn - borrowedOut` di mana `linkedTotal` (baris yang
+ * menempel pada transaksi ini) bagian dari `borrowedIn`. Diurutkan menjadi
+ * `need = spent - effectiveLimit + linkedTotal`. Hasil ditalang ke 0 karena
+ * kebutuhan tidak pernah di bawah nol. Karena guard pre-edit sudah memakai
+ * total pinjaman yang sama dengan data pasca-edit, hasilnya selalu
+ * `<= linkedTotal`: pengecilan tidak pernah menambah pinjaman.
+ */
+export function requiredBorrowTotal(
+  budget: Pick<Budget, "limit_amount"> & Partial<Pick<Budget, "leftover_discarded">>,
+  spent: number,
+  borrows: BorrowTotals | undefined,
+  linkedTotal: number
+): number {
+  return Math.max(0, spent - budgetEffectiveLimit(budget, spent, borrows) + linkedTotal);
+}
+
+export interface BorrowShrinkPlan {
+  deleteIds: string[];
+  updates: Array<{ id: string; amount: number }>;
+}
+
+/**
+ * Rencana pengecilan pinjaman setelah sebuah transaksi diedit menjadi lebih
+ * kecil. `needs` memuat `requiredBorrowTotal` per anggaran peminjam, `rows`
+ * hanya baris yang menempel pada transaksi itu.
+ *
+ * Per anggaran, total baris diturunkan tepat ke kebutuhannya -- dibatasi
+ * total yang ada, sehingga tidak pernah menambah dan tidak pernah di bawah
+ * nol. Baris terkecil lebih dulu dihapus; baris penyerap sisanya dipotong
+ * sebagian lewat update supaya hasilnya pas. Kebutuhan 0 menghapus seluruh
+ * baris anggaran itu.
+ */
+export function planBorrowShrink(
+  rows: readonly (BudgetBorrowRow & { id: string })[],
+  needs: ReadonlyMap<string, number>
+): BorrowShrinkPlan {
+  const groups = new Map<string, (BudgetBorrowRow & { id: string })[]>();
+  for (const row of rows) {
+    const group = groups.get(row.to_budget_id);
+    if (group) group.push(row);
+    else groups.set(row.to_budget_id, [row]);
+  }
+
+  const plan: BorrowShrinkPlan = { deleteIds: [], updates: [] };
+  for (const [budgetId, group] of groups) {
+    const total = group.reduce((sum, row) => sum + row.amount, 0);
+    const target = Math.min(total, Math.max(0, needs.get(budgetId) ?? 0));
+    let surplus = total - target;
+    if (surplus <= 0) continue;
+    for (const row of [...group].sort((a, b) => a.amount - b.amount)) {
+      if (surplus <= 0) break;
+      if (row.amount <= surplus) {
+        plan.deleteIds.push(row.id);
+        surplus -= row.amount;
+      } else {
+        plan.updates.push({ id: row.id, amount: row.amount - surplus });
+        surplus = 0;
+      }
+    }
+  }
+  return plan;
 }
 
 /**
@@ -83,6 +192,11 @@ export function budgetEffectiveLimit(
  * bertanggal mundur tetap dicek terhadap anggaran periode yang benar. Baris
  * yang sedang diedit dikeluarkan lewat `excludeTransactionId` agar nominal
  * lamanya tidak dihitung dua kali.
+ *
+ * `borrows` (hasil `aggregateBorrows`) menggeser batas efektif: pemberi yang
+ * sudah meminjamkan sebagian sisanya menolak lebih awal, peminjam mendapat
+ * ruang tambahan. Tanpa argumen, perilakunya sama persis dengan sebelum ada
+ * pinjaman.
  *
  * Tepat sama dengan batas masih dianggap aman; hanya nilai di atas batas yang
  * mengembalikan konflik. "Batas" di sini batas efektif: anggaran yang sisa-
@@ -96,7 +210,8 @@ export function findExceededBudget(
   > &
     Partial<Pick<Budget, "leftover_discarded">>)[],
   candidate: ExpenseCandidate,
-  excludeTransactionId?: number
+  excludeTransactionId?: number,
+  borrows?: ReadonlyMap<string, BorrowTotals>
 ): BudgetConflict | null {
   const amount = Number(candidate.amount);
   if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -118,7 +233,7 @@ export function findExceededBudget(
       ),
       budget
     );
-    const effectiveLimit = budgetEffectiveLimit(budget, spent);
+    const effectiveLimit = budgetEffectiveLimit(budget, spent, borrows?.get(budget.id));
     const projected = spent + amount;
     if (projected <= effectiveLimit) continue;
 
@@ -127,17 +242,70 @@ export function findExceededBudget(
       spent,
       remaining: budgetLeftover(effectiveLimit, spent),
       projected,
+      effectiveLimit,
     };
     if (
       !worst
-      || conflict.projected - effectiveLimit
-        > worst.projected - budgetEffectiveLimit(worst.budget, worst.spent)
+      || conflict.projected - conflict.effectiveLimit
+        > worst.projected - worst.effectiveLimit
     ) {
       worst = conflict;
     }
   }
 
   return worst;
+}
+
+export interface BorrowLenderCandidate {
+  budget: Pick<
+    Budget,
+    "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on"
+  > &
+    Partial<Pick<Budget, "leftover_discarded">>;
+  /** Sisa efektif pemberi setelah pinjaman yang sudah berjalan. */
+  remaining: number;
+}
+
+/**
+ * Daftar anggaran yang boleh dipinjami untuk menutup kekurangan sebuah transaksi.
+ *
+ * Syarat yang sama dengan keputusan server di `borrowBudget`:
+ * periodenya mencakup tanggal transaksi, sisa-ditutup dilarang, dan sisa
+ * efektifnya masih positif. Anggaran itu sendiri dikeluarkan -- meminjam
+ * dari diri sendiri tidak menambah apa pun. Pinjaman bebas lintas scope
+ * (kategori boleh dipinjam dari vault dan sebaliknya): yang dipinjam adalah
+ * izin plafon, bukan uang.
+ *
+ * Tanpa pinjaman yang tercatat, hasilnya daftar sisa biasa; begitu ada
+ * yang dipinjamkan, kapasitas pemberi di daftar ini langsung menyusut.
+ */
+export function eligibleBorrowLenders(
+  borrower: Pick<Budget, "id" | "scope"> & Partial<Pick<Budget, "leftover_discarded">>,
+  budgets: readonly (Pick<
+    Budget,
+    "id" | "scope" | "scope_id" | "limit_amount" | "starts_on" | "ends_on"
+  > &
+    Partial<Pick<Budget, "leftover_discarded">>)[],
+  transactions: readonly BudgetTransaction[],
+  borrows: readonly BudgetBorrowRow[],
+  date: string
+): BorrowLenderCandidate[] {
+  if (borrower.leftover_discarded) return [];
+  const totals = aggregateBorrows(borrows);
+  const candidates: BorrowLenderCandidate[] = [];
+  for (const budget of budgets) {
+    if (budget.id === borrower.id) continue;
+    if (date < budget.starts_on || date > budget.ends_on) continue;
+    if (budget.leftover_discarded) continue;
+    const spent = budgetSpend(transactions, budget);
+    const remaining = budgetLeftover(
+      budgetEffectiveLimit(budget, spent, totals.get(budget.id)),
+      spent
+    );
+    if (remaining <= 0) continue;
+    candidates.push({ budget, remaining });
+  }
+  return candidates;
 }
 
 export type BudgetStatus = "ok" | "warning" | "full" | "exceeded";
@@ -160,20 +328,27 @@ export function budgetStatus(
 }
 
 /**
- * Status yang ditampilkan kartu anggaran, memperhitungkan sisa yang sudah ditutup.
+ * Status yang ditampilkan kartu anggaran, memperhitungkan sisa yang sudah ditutup
+ * dan pinjaman yang sedang berjalan.
  *
  * Sisa yang dicabut membuat anggaran seketika terlihat "penuh" berapa pun angka
  * terpakainya, termasuk nol — kuotanya sudah dialihkan habis, tidak ada sisa yang
- * menunggu. `budgetStatus` sendiri tidak diubah karena batas nol tetap dimaknai
- * aman di sana (sudah dikunci test).
+ * menunggu. Pemberi yang sudah meminjamkan seluruh sisanya juga terlihat penuh:
+ * kapasitas belanjanya memang sudah dipakai peminjam. `budgetStatus` sendiri tidak
+ * diubah karena batas nol tetap dimaknai aman di sana (sudah dikunci test).
  */
 export function budgetDisplayStatus(
   budget: Pick<Budget, "limit_amount" | "alert_threshold"> &
     Partial<Pick<Budget, "leftover_discarded">>,
-  spent: number
+  spent: number,
+  borrows?: BorrowTotals
 ): BudgetStatus {
   if (budget.leftover_discarded) return "full";
-  return budgetStatus(spent, budget.limit_amount, Number(budget.alert_threshold));
+  return budgetStatus(
+    spent,
+    budgetEffectiveLimit(budget, spent, borrows),
+    Number(budget.alert_threshold)
+  );
 }
 
 /** Skema warna progress bar + teks status, dipakai oleh kartu anggaran. */

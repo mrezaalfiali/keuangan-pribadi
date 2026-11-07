@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  aggregateBorrows,
   budgetDisplayStatus,
   budgetEffectiveLimit,
   budgetLeftover,
@@ -8,11 +9,14 @@ import {
   budgetState,
   budgetStatus,
   defaultBudgetPeriod,
+  eligibleBorrowLenders,
   findExceededBudget,
   isValidPeriod,
   nextPeriod,
   paydayLabel,
   periodRange,
+  planBorrowShrink,
+  requiredBorrowTotal,
   type BudgetPeriod,
   type BudgetStatus,
 } from "@/src/lib/budget";
@@ -572,5 +576,352 @@ describe("budgetState", () => {
 
   it("ended setelah periode lewat", () => {
     expect(budgetState(PERIOD, "2026-04-10")).toBe("ended");
+  });
+});
+
+describe("aggregateBorrows", () => {
+  it("menjumlah pinjaman keluar pada pemberi dan masuk pada peminjam", () => {
+    const totals = aggregateBorrows([
+      { from_budget_id: "budget-a", to_budget_id: "budget-b", amount: 60_000 },
+    ]);
+    expect(totals.get("budget-a")).toEqual({ borrowedIn: 0, borrowedOut: 60_000 });
+    expect(totals.get("budget-b")).toEqual({ borrowedIn: 60_000, borrowedOut: 0 });
+  });
+
+  it("menumpuk beberapa pinjaman pada baris yang sama", () => {
+    const totals = aggregateBorrows([
+      { from_budget_id: "budget-a", to_budget_id: "budget-b", amount: 60_000 },
+      { from_budget_id: "budget-c", to_budget_id: "budget-b", amount: 40_000 },
+      { from_budget_id: "budget-a", to_budget_id: "budget-c", amount: 10_000 },
+    ]);
+    expect(totals.get("budget-a")).toEqual({ borrowedIn: 0, borrowedOut: 70_000 });
+    expect(totals.get("budget-b")).toEqual({ borrowedIn: 100_000, borrowedOut: 0 });
+    expect(totals.get("budget-c")).toEqual({ borrowedIn: 10_000, borrowedOut: 40_000 });
+  });
+
+  it("kosong saat belum ada pinjaman", () => {
+    expect(aggregateBorrows([]).size).toBe(0);
+  });
+});
+
+describe("budgetEffectiveLimit dengan pinjaman", () => {
+  it("menaikkan batas peminjam sebesar yang dipinjam", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000 }, 400_000, {
+        borrowedIn: 150_000,
+        borrowedOut: 0,
+      })
+    ).toBe(650_000);
+  });
+
+  it("menurunkan batas pemberi sebesar yang dipinjamkan", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 500_000 }, 100_000, {
+        borrowedIn: 0,
+        borrowedOut: 350_000,
+      })
+    ).toBe(150_000);
+  });
+
+  it("tidak pernah turun di bawah nol walau pinjaman melebihi batas", () => {
+    expect(
+      budgetEffectiveLimit({ limit_amount: 100_000 }, 0, {
+        borrowedIn: 0,
+        borrowedOut: 250_000,
+      })
+    ).toBe(0);
+  });
+
+  it("sisa ditutup tetap mengunci pada angka terpakai walau ada pinjaman masuk", () => {
+    expect(
+      budgetEffectiveLimit(
+        { limit_amount: 500_000, leftover_discarded: true },
+        300_000,
+        { borrowedIn: 200_000, borrowedOut: 0 }
+      )
+    ).toBe(300_000);
+  });
+});
+
+describe("budgetDisplayStatus dengan pinjaman", () => {
+  const budget = { limit_amount: 500_000, alert_threshold: 0.8 };
+
+  it("pemberi yang sudah meminjamkan sebagian sisanya ikut diperhitungkan", () => {
+    expect(budgetDisplayStatus(budget, 400_000)).toBe("warning");
+    expect(
+      budgetDisplayStatus(budget, 400_000, { borrowedIn: 0, borrowedOut: 100_000 })
+    ).toBe("full");
+  });
+
+  it("peminjam kembali aman setelah pinjaman menambah batasnya", () => {
+    expect(budgetDisplayStatus(budget, 500_000)).toBe("full");
+    expect(
+      budgetDisplayStatus(budget, 500_000, { borrowedIn: 150_000, borrowedOut: 0 })
+    ).toBe("ok");
+  });
+});
+
+describe("findExceededBudget dengan pinjaman", () => {
+  const categoryBudget = {
+    id: "budget-food",
+    scope: "category" as const,
+    scope_id: "cat-food",
+    limit_amount: 500_000,
+    ...PERIOD,
+  };
+  const candidate = {
+    amount: 150_000,
+    date: "2026-03-20",
+    category_id: "cat-food",
+    vault_id: "vault-a",
+  };
+
+  it("ruang pinjaman masuk membuat nominal yang tadinya ditolak jadi muat", () => {
+    const rows = [tx({ amount: 400_000, category_id: "cat-food", vault_id: "vault-a" })];
+    // Tanpa pinjaman: 400k + 150k melewati batas 500k.
+    expect(findExceededBudget(rows, [categoryBudget], candidate)).not.toBeNull();
+    const borrows = aggregateBorrows([
+      { from_budget_id: "budget-other", to_budget_id: "budget-food", amount: 100_000 },
+    ]);
+    expect(
+      findExceededBudget(rows, [categoryBudget], candidate, undefined, borrows)
+    ).toBeNull();
+  });
+
+  it("pemberi yang sudah meminjamkan sebagian sisanya menolak lebih awal", () => {
+    const rows = [tx({ amount: 100_000, category_id: "cat-food", vault_id: "vault-a" })];
+    // Tanpa pinjaman: 100k + 150k masih muat di 500k.
+    expect(findExceededBudget(rows, [categoryBudget], candidate)).toBeNull();
+    const borrows = aggregateBorrows([
+      { from_budget_id: "budget-food", to_budget_id: "budget-other", amount: 350_000 },
+    ]);
+    const conflict = findExceededBudget(
+      rows,
+      [categoryBudget],
+      candidate,
+      undefined,
+      borrows
+    );
+    expect(conflict?.effectiveLimit).toBe(150_000);
+    expect(conflict?.remaining).toBe(50_000);
+    expect(conflict?.projected).toBe(250_000);
+  });
+});
+
+describe("eligibleBorrowLenders", () => {
+  const borrower = {
+    id: "budget-food",
+    scope: "category" as const,
+    scope_id: "cat-food",
+    limit_amount: 500_000,
+    ...PERIOD,
+  };
+  const lender = {
+    id: "budget-transport",
+    scope: "category" as const,
+    scope_id: "cat-transport",
+    limit_amount: 400_000,
+    ...PERIOD,
+  };
+  const vaultLender = {
+    id: "budget-vault",
+    scope: "vault" as const,
+    scope_id: "vault-a",
+    limit_amount: 300_000,
+    ...PERIOD,
+  };
+
+  it("menawarkan sesama kategori yang sisa efektifnya masih positif", () => {
+    const rows = [tx({ amount: 350_000, category_id: "cat-transport", vault_id: "vault-a" })];
+    const candidates = eligibleBorrowLenders(
+      borrower,
+      [borrower, lender, vaultLender],
+      rows,
+      [],
+      "2026-03-20"
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].budget.id).toBe("budget-transport");
+    expect(candidates[0].remaining).toBe(50_000);
+  });
+
+  it("mengeluarkan diri sendiri dan periodenya tidak mencakup", () => {
+    const outside = {
+      ...lender,
+      id: "budget-later",
+      scope_id: "cat-later",
+      starts_on: "2026-04-10",
+      ends_on: "2026-05-09",
+    };
+    const candidates = eligibleBorrowLenders(
+      borrower,
+      [borrower, outside],
+      [],
+      [],
+      "2026-03-20"
+    );
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("menawarkan lintas scope: kategori boleh dipinjam dari vault", () => {
+    const candidates = eligibleBorrowLenders(
+      borrower,
+      [vaultLender],
+      [],
+      [],
+      "2026-03-20"
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].budget.id).toBe("budget-vault");
+    expect(candidates[0].remaining).toBe(300_000);
+  });
+
+  it("sisa yang sudah ditutup tidak ditawarkan", () => {
+    const closed = { ...lender, leftover_discarded: true };
+    expect(
+      eligibleBorrowLenders(borrower, [closed], [], [], "2026-03-20")
+    ).toHaveLength(0);
+    expect(
+      eligibleBorrowLenders(
+        { ...borrower, leftover_discarded: true },
+        [lender],
+        [],
+        [],
+        "2026-03-20"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("kapasitas pemberi menyusut oleh pinjaman yang sedang berjalan", () => {
+    const borrows = [
+      { from_budget_id: "budget-transport", to_budget_id: "budget-food", amount: 150_000 },
+    ];
+    const candidates = eligibleBorrowLenders(
+      borrower,
+      [borrower, lender],
+      [],
+      borrows,
+      "2026-03-20"
+    );
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].remaining).toBe(250_000);
+  });
+
+  it("pemberi yang sudah habis sisanya tidak lagi ditawarkan", () => {
+    const borrows = [
+      { from_budget_id: "budget-transport", to_budget_id: "budget-food", amount: 400_000 },
+    ];
+    expect(
+      eligibleBorrowLenders(borrower, [lender], [], borrows, "2026-03-20")
+    ).toHaveLength(0);
+  });
+});
+
+describe("requiredBorrowTotal", () => {
+  const budget = { limit_amount: 100_000 };
+
+  it("nol saat edit mengecilkan supaya kembali muat tanpa pinjaman berlebih", () => {
+    expect(
+      requiredBorrowTotal(budget, 90_000, { borrowedIn: 20_000, borrowedOut: 0 }, 20_000)
+    ).toBe(0);
+  });
+
+  it("menyisakan pinjaman sebesar kelebihan yang masih tersisa", () => {
+    expect(
+      requiredBorrowTotal(budget, 115_000, { borrowedIn: 20_000, borrowedOut: 0 }, 20_000)
+    ).toBe(15_000);
+  });
+
+  it("memperhitungkan pinjaman keluar dari anggaran peminjam sendiri", () => {
+    expect(
+      requiredBorrowTotal(budget, 60_000, { borrowedIn: 10_000, borrowedOut: 50_000 }, 10_000)
+    ).toBe(10_000);
+  });
+
+  it("sisa ditutup: kebutuhan tetap tidak melebihi baris yang terkait", () => {
+    expect(
+      requiredBorrowTotal(
+        { ...budget, leftover_discarded: true },
+        80_000,
+        { borrowedIn: 20_000, borrowedOut: 0 },
+        20_000
+      )
+    ).toBe(20_000);
+  });
+
+  it("nol saat spent masih di bawah batas efektif tanpa baris terkait", () => {
+    expect(requiredBorrowTotal(budget, 60_000, undefined, 0)).toBe(0);
+  });
+
+  it("tidak pernah negatif walau batas efektif melampaui spent", () => {
+    expect(
+      requiredBorrowTotal(budget, 10_000, { borrowedIn: 50_000, borrowedOut: 0 }, 50_000)
+    ).toBe(0);
+  });
+});
+
+describe("planBorrowShrink", () => {
+  function row(id: string, toBudgetId: string, amount: number) {
+    return { id, from_budget_id: "budget-transport", to_budget_id: toBudgetId, amount };
+  }
+
+  it("tanpa kelebihan tidak merencanakan apa pun", () => {
+    const rows = [row("b1", "budget-food", 10_000)];
+    expect(planBorrowShrink(rows, new Map([["budget-food", 10_000]]))).toEqual({
+      deleteIds: [],
+      updates: [],
+    });
+    expect(planBorrowShrink(rows, new Map([["budget-food", 20_000]]))).toEqual({
+      deleteIds: [],
+      updates: [],
+    });
+  });
+
+  it("menghapus baris terkecil lebih dulu sampai hasilnya pas", () => {
+    const rows = [row("b1", "budget-food", 10_000), row("b2", "budget-food", 90_000)];
+    expect(planBorrowShrink(rows, new Map([["budget-food", 50_000]]))).toEqual({
+      deleteIds: ["b1"],
+      updates: [{ id: "b2", amount: 50_000 }],
+    });
+  });
+
+  it("kebutuhan nol menghapus seluruh baris anggaran itu", () => {
+    const rows = [row("b1", "budget-food", 10_000), row("b2", "budget-food", 90_000)];
+    expect(planBorrowShrink(rows, new Map([["budget-food", 0]]))).toEqual({
+      deleteIds: ["b1", "b2"],
+      updates: [],
+    });
+  });
+
+  it("memotong sebagian baris penyerap saat kelebihan lebih kecil dari satu baris", () => {
+    const rows = [row("b1", "budget-food", 30_000)];
+    expect(planBorrowShrink(rows, new Map([["budget-food", 10_000]]))).toEqual({
+      deleteIds: [],
+      updates: [{ id: "b1", amount: 10_000 }],
+    });
+  });
+
+  it("menangani dua anggaran peminjam secara terpisah", () => {
+    const rows = [
+      row("b1", "budget-food", 10_000),
+      row("b2", "budget-food", 20_000),
+      row("b3", "budget-vault", 40_000),
+    ];
+    const needs = new Map([
+      ["budget-food", 15_000],
+      ["budget-vault", 0],
+    ]);
+    expect(planBorrowShrink(rows, needs)).toEqual({
+      deleteIds: ["b1", "b3"],
+      updates: [{ id: "b2", amount: 15_000 }],
+    });
+  });
+
+  it("kebutuhan yang tidak ada diperlakukan sebagai nol", () => {
+    const rows = [row("b1", "budget-food", 10_000)];
+    expect(planBorrowShrink(rows, new Map())).toEqual({
+      deleteIds: ["b1"],
+      updates: [],
+    });
   });
 });

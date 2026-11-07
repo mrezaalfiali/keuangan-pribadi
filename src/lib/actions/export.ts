@@ -23,7 +23,9 @@ async function readData<T>(name: string, query: PromiseLike<BackupQueryResult>):
       code: result.error.code,
       message: result.error.message,
     });
-    throw new Error(`backup.export.${name}`);
+    const err = new Error(`backup.export.${name}`) as Error & { code?: string };
+    err.code = result.error.code;
+    throw err;
   }
   return result.data as T;
 }
@@ -76,9 +78,23 @@ export async function exportJson(): Promise<ExportPayload> {
               allocationRules.map((rule) => String(rule.id))
             ).order("id").range(from, to)
         );
-    const totalRows = transactions.length + vaults.length + categories.length + budgets.length +
-      allocationRules.length + allocationSlots.length + recurringTransactions.length;
-    if (totalRows > MAX_BACKUP_ROWS) throw new Error("backup.export.tooManyRows");
+
+    let rawBudgetBorrows: Record<string, unknown>[] = [];
+    try {
+      rawBudgetBorrows = await readAllRows<Record<string, unknown>>(
+        "budget_borrows",
+        (from, to) =>
+          supabase
+            .from("budget_borrows")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("id")
+            .range(from, to)
+      );
+    } catch (borrowError) {
+      console.warn("Could not read budget_borrows for backup export (table may not exist yet).", borrowError);
+      rawBudgetBorrows = [];
+    }
 
     const backupTransactions = transactions.map((transaction) => {
       const backupKey = typeof transaction.backup_key === "string"
@@ -89,6 +105,31 @@ export async function exportJson(): Promise<ExportPayload> {
             .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, "$1-$2-$3-$4-$5");
       return { ...transaction, backup_key: backupKey };
     });
+
+    const txBackupKeyMap = new Map<number | string, string>();
+    for (const transaction of backupTransactions as Array<Record<string, unknown> & { backup_key: string }>) {
+      const txId = transaction.id;
+      if (txId !== undefined && txId !== null && typeof transaction.backup_key === "string") {
+        txBackupKeyMap.set(txId as number | string, transaction.backup_key);
+      }
+    }
+
+    const budgetBorrows = rawBudgetBorrows.map((row) => ({
+      id: row.id,
+      from_budget_id: row.from_budget_id,
+      to_budget_id: row.to_budget_id,
+      amount: row.amount,
+      created_at: row.created_at,
+      transaction_backup_key:
+        row.transaction_id !== null && row.transaction_id !== undefined
+          ? txBackupKeyMap.get(row.transaction_id as number | string) ?? null
+          : null,
+    }));
+
+    const totalRows = transactions.length + vaults.length + categories.length + budgets.length +
+      allocationRules.length + allocationSlots.length + recurringTransactions.length + budgetBorrows.length;
+    if (totalRows > MAX_BACKUP_ROWS) throw new Error("backup.export.tooManyRows");
+
     const data = JSON.stringify(
       {
         schema_version: 1,
@@ -100,6 +141,7 @@ export async function exportJson(): Promise<ExportPayload> {
         categories,
         transactions: backupTransactions,
         budgets,
+        budget_borrows: budgetBorrows,
         allocation_rules: allocationRules,
         allocation_slots: allocationSlots,
         recurring_transactions: recurringTransactions,

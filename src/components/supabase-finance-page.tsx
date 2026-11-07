@@ -6,11 +6,13 @@ import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronD
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
+import { Dialog } from "@/src/components/ui/dialog";
 import { Field, Input } from "@/src/components/ui/input";
 import { createClient } from "@/src/lib/supabase/client";
 import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/actions/transactions";
+import { borrowBudget } from "@/src/lib/actions/budgets";
 import { createIncomeSource, deleteIncomeSource, updateIncomeSource } from "@/src/lib/actions/categories";
 import {
   applySourceOverrides,
@@ -23,7 +25,15 @@ import {
 import { resolveLabel, humanizeSlug, sortByLabel } from "@/src/lib/labels";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
-import { budgetDisplayStatus, budgetEffectiveLimit, budgetSpend, budgetState } from "@/src/lib/budget";
+import {
+  aggregateBorrows,
+  budgetDisplayStatus,
+  budgetEffectiveLimit,
+  budgetSpend,
+  budgetState,
+  eligibleBorrowLenders,
+  type BorrowLenderCandidate,
+} from "@/src/lib/budget";
 import { filterTransactions } from "@/src/lib/transaction-filters";
 import { incomeLockedVaultError } from "@/src/lib/vault-ledger";
 import { todayJakartaISO } from "@/src/lib/recurring";
@@ -38,7 +48,7 @@ import {
   skipRecurringOccurrence,
   snoozeRecurringOccurrence,
 } from "@/src/lib/actions/recurring";
-import type { Budget, Category, RecurringTransaction, Transaction, Vault } from "@/src/lib/types";
+import type { Budget, BudgetBorrow, Category, RecurringTransaction, Transaction, Vault } from "@/src/lib/types";
 
 type CategoryRef = Pick<Category, "id" | "slug" | "name_key">;
 
@@ -336,6 +346,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [recurringIntervalCount, setRecurringIntervalCount] = useState(1);
   const [editVaultId, setEditVaultId] = useState("");
   const [editFundingSourceId, setEditFundingSourceId] = useState("");
+  const [budgetBorrows, setBudgetBorrows] = useState<BudgetBorrow[]>([]);
+  /**
+   * Penolakan anggaran yang masih bisa ditutup lewat pinjaman. Menyimpan
+   * form yang sedang terpasang supaya setelah pinjaman tercatat, simpan
+   * bisa diulang otomatis tanpa mengisi ulang. Dibersihkan begitu simpan
+   * berhasil atau penolakannya bukan soal anggaran lagi.
+   */
+  const [borrowRejection, setBorrowRejection] = useState<{
+    kind: "add" | "edit" | "recurring";
+    form: HTMLFormElement;
+    editTxId: number | null;
+    /** Template yang sedang dicatat; hanya untuk penolakan occurrence recurring. */
+    template: RecurringTransaction | null;
+    budget: { id: string; scope: "category" | "vault"; remaining: number; shortfall: number };
+    date: string;
+    borrowIds: string[];
+  } | null>(null);
+  const [borrowDialogOpen, setBorrowDialogOpen] = useState(false);
+  const [borrowing, setBorrowing] = useState(false);
+  const [borrowError, setBorrowError] = useState("");
 
   useEffect(() => {
     if (mobileActionsTxId === null) return;
@@ -402,7 +432,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       if (authError) throw authError;
       if (!user) throw new Error("Session Supabase tidak ditemukan.");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [txResult, vaultResult, budgetResult, recurringResult, overrideResult] = await Promise.all([
+      const [txResult, vaultResult, budgetResult, recurringResult, overrideResult, borrowResult] = await Promise.all([
         supabase.from("transactions")
           .select("*, vault:vaults(id,slug,name,is_locked), category:categories!transactions_category_id_fkey(id,slug,name_key), funding:categories!transactions_funding_source_id_fkey(id,slug,name_key)")
           .eq("user_id", user.id)
@@ -422,6 +452,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         supabase.from("category_overrides")
           .select("category_id, custom_name, hidden")
           .eq("user_id", user.id),
+        // Migrasi 0028 dijalankan manual; tanpa tabel pinjaman, form tetap
+        // harus bisa menampilkan transaksi -- daftar kosong bukan kegagalan.
+        supabase.from("budget_borrows")
+          .select("*")
+          .eq("user_id", user.id),
       ]);
       if (txResult.error) throw txResult.error;
       if (vaultResult.error) throw vaultResult.error;
@@ -432,12 +467,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         // karena tabel override belum ada; sumber tetap tampil dengan nama asli.
         logSupabaseError("finance.loadSourceOverrides", overrideResult.error);
       }
+      if (borrowResult.error) {
+        logSupabaseError("finance.loadBudgetBorrows", borrowResult.error);
+      }
       const overrides = (overrideResult.data ?? []) as SourceOverride[];
       setTransactions((txResult.data ?? []) as TxRow[]);
       setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setSourceOverrides(overrides);
       setCategories(sortByLabel(applySourceOverrides(categories, overrides), categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
+      setBudgetBorrows((borrowResult.data ?? []) as BudgetBorrow[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
     } catch (loadError) {
       logSupabaseError("finance.load", loadError);
@@ -465,10 +504,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const previousSummaryMonth = shiftMonth(summaryMonth, -1);
   const monthlySummary = buildMonthlySummary(transactions, summaryMonth);
   const previousMonthlySummary = buildMonthlySummary(transactions, previousSummaryMonth);
+  const borrowTotals = useMemo(() => aggregateBorrows(budgetBorrows), [budgetBorrows]);
   const budgetAlerts = budgets.flatMap((budget) => {
     if (budgetState(budget, todayISO()) !== "active") return [];
     const spent = budgetSpend(transactions, budget);
-    const status = budgetDisplayStatus(budget, spent);
+    const status = budgetDisplayStatus(budget, spent, borrowTotals.get(budget.id));
     if (status === "ok") return [];
     const targetLabel = budget.scope === "vault"
       ? vaultLabel(vaults.find((vault) => vault.id === budget.scope_id))
@@ -478,7 +518,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       status,
       label: targetLabel ?? dashboard(budget.scope === "vault" ? "budgetVault" : "budgetCategory"),
       spent,
-      limit: budgetEffectiveLimit(budget, spent),
+      limit: budgetEffectiveLimit(budget, spent, borrowTotals.get(budget.id)),
     }];
   });
   const onboardingSteps = getOnboardingSteps(transactions, vaults, budgets, todayJakartaISO());
@@ -750,13 +790,31 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     template: RecurringTransaction
   ) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    await runRecurringRecord(template, event.currentTarget, []);
+  }
+
+  /**
+   * Mencatat satu occurrence. `borrowIds` meneruskan pinjaman yang sudah
+   * dicatat sebelumnya supaya bisa ditautkan ke transaksi yang akhirnya
+   * berhasil disimpan -- sama dengan alur add biasa.
+   */
+  async function runRecurringRecord(
+    template: RecurringTransaction,
+    form: HTMLFormElement,
+    borrowIds: string[]
+  ) {
+    const data = new FormData(form);
     const allocationMode = String(data.get("allocationMode") ?? "auto");
     const vaultId = String(data.get("vaultId") ?? "") || null;
     if (template.type === "income" && allocationMode === "single" && !vaultId) {
       setError(txText("vaultRequired"));
       return;
     }
+    const transactionDate = String(data.get("transactionDate") ?? "");
+    // State penolakan lama gugur di sini: percobaan baru menentukan
+    // penolakannya sendiri -- pinjaman lama tetap tercatat di database.
+    setBorrowRejection(null);
+    setBorrowDialogOpen(false);
     setSaving(true);
     setError("");
     setRewardNotice("");
@@ -765,18 +823,32 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       const result = await recordRecurringTransaction(locale, {
         templateId: template.id,
         dueOn: template.due_on,
-        transactionDate: String(data.get("transactionDate") ?? ""),
+        transactionDate,
         amount: Number(data.get("amount")),
         categoryId: String(data.get("categoryId") ?? "") || null,
         fundingSourceId: template.type === "expense"
           ? String(data.get("fundingSourceId") ?? "") || null
           : null,
-        vaultId: String(data.get("vaultId") ?? "") || null,
+        vaultId,
         note: String(data.get("note") ?? ""),
         allocationMode: allocationMode === "single" ? "single" : "auto",
-      });
+      }, { borrowIds });
       if (!result.ok) {
         setError(recurringErrorMessage(result.error, result.budget));
+        // Penolakan anggaran pada baris yang masih boleh meminjam membuka
+        // pintu pinjaman; penolakan lain tidak relevan dengan alur ini.
+        if (result.budget && borrowOfferable(result.budget.id)) {
+          setBorrowRejection({
+            kind: "recurring",
+            form,
+            editTxId: null,
+            template,
+            budget: result.budget,
+            date: transactionDate,
+            borrowIds,
+          });
+          setBorrowDialogOpen(true);
+        }
         return;
       }
       setNotice(txText("recurringRecorded"));
@@ -811,6 +883,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     action: () => Promise<{ ok: boolean; error?: string }>,
     successMessage: string
   ) {
+    // Snooze/skip di luar alur pinjaman: penolakan anggaran lama tidak
+    // relevan lagi, jadi tombol pinjam jangan menempel di error berikutnya.
+    dismissBorrowFlow();
     setSaving(true);
     setError("");
     try {
@@ -949,10 +1024,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
-  async function submitTransaction(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
+  async function runAddTransaction(form: HTMLFormElement, borrowIds: string[]) {
     const data = new FormData(form);
+    // State penolakan lama gugur di sini: percobaan baru menentukan
+    // penolakannya sendiri -- pinjaman lama tetap tercatat di database.
+    setBorrowRejection(null);
+    setBorrowDialogOpen(false);
     const rawAmount = Number(data.get("amount"));
     const amount = Math.trunc(rawAmount);
     const date = String(data.get("date") ?? "");
@@ -1005,9 +1082,23 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         destinationVaultId: type === "transfer" ? destinationVaultId : null,
         allocationMode: type === "income" ? allocationMode : null,
         note: String(data.get("note") ?? "").trim() || null,
-      });
+      }, { borrowIds });
       if (!result.ok) {
         setFormError(transactionError(result.error, result.budget));
+        // Penolakan anggaran pada baris yang masih boleh meminjam membuka
+        // pintu pinjaman; penolakan lain tidak relevan dengan alur ini.
+        if (result.budget && borrowOfferable(result.budget.id)) {
+          setBorrowRejection({
+            kind: "add",
+            form,
+            editTxId: null,
+            template: null,
+            budget: result.budget,
+            date,
+            borrowIds,
+          });
+          setBorrowDialogOpen(true);
+        }
         return;
       }
       if (result.rewardError) {
@@ -1046,6 +1137,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
+  async function submitTransaction(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runAddTransaction(event.currentTarget, []);
+  }
+
   async function removeTransaction(id: number) {
     if (!window.confirm(txText("deleteConfirm"))) return;
     setError("");
@@ -1065,6 +1161,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   function startEditingTransaction(transaction: TxRow) {
     setMobileActionsTxId(null);
     setEditError("");
+    dismissBorrowFlow();
     setEditingTransaction(transaction);
     setEditVaultId(transaction.vault_id ?? "");
     setEditFundingSourceId(transaction.funding_source_id ?? "");
@@ -1091,19 +1188,21 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setAddFormKey((key) => key + 1);
     setAddFormOpen(true);
     setEditingTransaction(null);
+    dismissBorrowFlow();
     document.getElementById("transaction-add-form")?.scrollIntoView({
       behavior: "smooth",
       block: "start",
     });
   }
 
-  async function saveTransactionEdit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function runEditTransaction(form: HTMLFormElement) {
     if (!editingTransaction) return;
     setSavingEdit(true);
     setEditError("");
     setError("");
-    const formData = new FormData(event.currentTarget);
+    setBorrowRejection(null);
+    setBorrowDialogOpen(false);
+    const formData = new FormData(form);
     const rawAmount = Number(formData.get("amount"));
     const amount = Math.trunc(rawAmount);
     if (!Number.isSafeInteger(rawAmount) || amount <= 0 || amount > 2_147_483_647) {
@@ -1154,6 +1253,18 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         else if (result.error === "transactions.expenseVaultRequired") setEditError(txText("expenseVaultRequired"));
         else if (result.error === "transactions.vaultRequired") setEditError(txText("vaultRequired"));
         else setEditError(settings("saveError"));
+        if (result.budget && borrowOfferable(result.budget.id)) {
+          setBorrowRejection({
+            kind: "edit",
+            form,
+            editTxId: editingTransaction.id,
+            template: null,
+            budget: result.budget,
+            date: String(formData.get("date") ?? ""),
+            borrowIds: [],
+          });
+          setBorrowDialogOpen(true);
+        }
         return;
       }
       setEditingTransaction(null);
@@ -1164,6 +1275,135 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       setEditError(settings("saveError"));
     } finally {
       setSavingEdit(false);
+    }
+  }
+
+  async function saveTransactionEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runEditTransaction(event.currentTarget);
+  }
+
+  /**
+   * Menutup alur pinjaman saat form yang memicunya ditutup atau diganti:
+   * `form` di dalam penolakan menunjuk elemen yang sudah tidak terpasang,
+   * dan menyimpannya lebih lama hanya membuat tombol pinjam menyasar
+   * data lama.
+   */
+  function dismissBorrowFlow() {
+    setBorrowRejection(null);
+    setBorrowDialogOpen(false);
+    setBorrowError("");
+  }
+
+  /**
+   * Anggaran yang ditolak masih boleh menawarkan pinjaman: keputusan
+   * "tutup sisa" berarti kuotanya sudah dialihkan, jadi tidak lagi boleh
+   * meminjam. Baris yang sudah tidak ada di daftar biar jatuh ke pesan
+   * penolakan biasa.
+   */
+  function borrowOfferable(budgetId: string) {
+    const budget = budgets.find((row) => row.id === budgetId);
+    return Boolean(budget && !budget.leftover_discarded);
+  }
+
+  function borrowErrorMessage(code: string | undefined) {
+    switch (code) {
+      case "err.borrowPeriod": return messages("budgets.errBorrowPeriod");
+      case "err.borrowDiscarded": return messages("budgets.errBorrowDiscarded");
+      case "err.borrowRemaining": return messages("budgets.errBorrowRemaining");
+      case "err.borrowAmount": return messages("budgets.errBorrowAmount");
+      case "err.borrowSame": return messages("budgets.errBorrowSame");
+      case "err.borrowNotFound": return messages("budgets.errBorrowNotFound");
+      case "err.period":
+      case "err.periodRange": return messages("budgets.errPeriodRange");
+      case "err.auth": return txText("authError");
+      default: return settings("saveError");
+    }
+  }
+
+  const lenderCandidates = useMemo(() => {
+    if (!borrowRejection) return [];
+    const borrower = budgets.find((row) => row.id === borrowRejection.budget.id);
+    if (!borrower) return [];
+    return eligibleBorrowLenders(
+      borrower,
+      budgets,
+      transactions,
+      budgetBorrows,
+      borrowRejection.date
+    );
+  }, [borrowRejection, budgets, transactions, budgetBorrows]);
+
+  /**
+   * Label anggaran untuk daftar pemberi pinjaman, berprefix jenis scope
+   * (mis. "Kategori · Makan"): pinjaman bebas lintas scope, jadi nama
+   * kategori dan vault bisa sama dan harus bisa dibedakan.
+   */
+  function budgetScopeName(budget: Pick<Budget, "scope" | "scope_id">) {
+    const scopeLabel = messages(budget.scope === "vault" ? "budgets.scopeVault" : "budgets.scopeCategory");
+    const name = budget.scope === "vault"
+      ? vaultLabel(vaults.find((vault) => vault.id === budget.scope_id))
+      : categoryLabel(categories.find((category) => category.id === budget.scope_id));
+    // Tanpa nama, prefix-nya sendiri sudah menjelaskan jenis scope-nya.
+    return name ? `${scopeLabel} · ${name}` : scopeLabel;
+  }
+
+  /**
+   * Mencatat pinjaman lalu menyimpan ulang transaksi yang tadinya ditolak.
+   * Kalau masih kurang (pemberi tidak mencukupi), penolakan baru datang
+   * dengan sisa terkini dan dialog terbuka lagi -- pinjam boleh berulang
+   * dari beberapa anggaran sampai transaksinya muat.
+   */
+  async function confirmBorrow(lender: BorrowLenderCandidate) {
+    if (!borrowRejection || borrowing) return;
+    const amount = Math.min(borrowRejection.budget.shortfall, lender.remaining);
+    if (amount <= 0) return;
+    setBorrowing(true);
+    setBorrowError("");
+    try {
+      const result = await borrowBudget(locale, {
+        borrowerBudgetId: borrowRejection.budget.id,
+        lenderBudgetId: lender.budget.id,
+        date: borrowRejection.date,
+        amount,
+        transactionId: borrowRejection.editTxId,
+      });
+      const borrowId = result.borrowId;
+      if (!result.ok || !borrowId) {
+        setBorrowError(borrowErrorMessage(result.error));
+        return;
+      }
+      // Baris optimistis: sisa pemberi langsung menyusut sehingga kalau
+      // transaksi masih kurang dan dialog terbuka lagi, kandidat yang
+      // sudah habis tidak ditawarkan dua kali (server tetap penentu).
+      setBudgetBorrows((rows) => [...rows, {
+        id: borrowId,
+        user_id: "",
+        from_budget_id: lender.budget.id,
+        to_budget_id: borrowRejection.budget.id,
+        transaction_id: borrowRejection.editTxId,
+        amount,
+        created_at: new Date().toISOString(),
+      }]);
+      setBorrowDialogOpen(false);
+      if (borrowRejection.kind === "add") {
+        await runAddTransaction(borrowRejection.form, [
+          ...borrowRejection.borrowIds,
+          borrowId,
+        ]);
+      } else if (borrowRejection.kind === "edit") {
+        await runEditTransaction(borrowRejection.form);
+      } else if (borrowRejection.template) {
+        await runRecurringRecord(borrowRejection.template, borrowRejection.form, [
+          ...borrowRejection.borrowIds,
+          borrowId,
+        ]);
+      }
+    } catch (borrowActionError) {
+      console.error("Supabase budget borrow failed.", borrowActionError);
+      setBorrowError(settings("saveError"));
+    } finally {
+      setBorrowing(false);
     }
   }
 
@@ -1239,9 +1479,20 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
           <Input name="note" maxLength={200} defaultValue={transaction.note ?? ""} />
         </Field>
         {editError && <p role="alert" className="text-sm text-danger sm:col-span-2">{editError}</p>}
+        {editError && borrowRejection?.kind === "edit" && (
+          <Button
+            type="button"
+            variant="outline"
+            className="sm:col-span-2"
+            disabled={savingEdit}
+            onClick={() => { setBorrowError(""); setBorrowDialogOpen(true); }}
+          >
+            {messages("budgets.borrowAction")}
+          </Button>
+        )}
         <div className="flex gap-2 sm:col-span-2">
           <Button type="submit" disabled={savingEdit}>{common("save")}</Button>
-          <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditError(""); }}>{common("cancel")}</Button>
+          <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditError(""); dismissBorrowFlow(); }}>{common("cancel")}</Button>
         </div>
       </form>
     );
@@ -1255,6 +1506,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         <p className="mt-2 text-sm text-muted">{settings("cloudStorage")}</p>
       </div>
       {error && <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</p>}
+      {error && borrowRejection?.kind === "recurring" && (
+        <Button
+          type="button"
+          variant="outline"
+          disabled={saving}
+          onClick={() => { setBorrowError(""); setBorrowDialogOpen(true); }}
+        >
+          {messages("budgets.borrowAction")}
+        </Button>
+      )}
       {notice && <p role="status" className="rounded-xl border border-accent/30 bg-accent/10 p-3 text-sm text-accent">{notice}</p>}
       {rewardNotice && <p role={rewardFailed ? "alert" : "status"} className={`rounded-xl border p-3 text-sm ${rewardFailed ? "border-danger/30 bg-danger/10 text-danger" : "border-accent/30 bg-accent/10 text-accent"}`}>{rewardNotice}</p>}
       {section === "dashboard" && (
@@ -1898,7 +2159,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             {section === "dashboard" && addFormOpen && (
               <button
                 type="button"
-                onClick={() => setAddFormOpen(false)}
+                onClick={() => { setAddFormOpen(false); dismissBorrowFlow(); }}
                 className="text-xs font-medium text-muted transition-colors hover:text-ink"
               >
                 {common("close")}
@@ -1908,7 +2169,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             {section === "dashboard" && !addFormOpen ? (
               <button
                 type="button"
-                onClick={() => setAddFormOpen(true)}
+                onClick={() => { setAddFormOpen(true); dismissBorrowFlow(); }}
                 className="mt-4 flex flex-1 items-center justify-center gap-2 rounded-xl border border-dashed border-line bg-bg1/60 px-4 py-6 text-sm font-medium text-muted transition-colors hover:border-accent/40 hover:text-ink"
               >
               <Plus size={16} />
@@ -2053,6 +2314,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             )}
             <Field label={txText("note")}><Input name="note" maxLength={200} defaultValue={formPrefill?.note ?? ""} /></Field>
             {formError && <p role="alert" className="text-sm text-danger">{formError}</p>}
+            {formError && borrowRejection?.kind === "add" && (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={saving}
+                onClick={() => { setBorrowError(""); setBorrowDialogOpen(true); }}
+              >
+                {messages("budgets.borrowAction")}
+              </Button>
+            )}
             <Button type="submit" disabled={saving}>{saving ? common("loading") : common("save")}</Button>
             </form>
           )}
@@ -2477,6 +2748,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                             if (isEditing) {
                                               setEditingTransaction(null);
                                               setEditError("");
+                                              dismissBorrowFlow();
                                             } else {
                                               startEditingTransaction(transaction);
                                             }
@@ -2650,6 +2922,60 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             </div>
           </CardContent></Card>
       </div>
+
+      <Dialog
+        open={borrowDialogOpen}
+        onClose={() => setBorrowDialogOpen(false)}
+        title={messages("budgets.borrowTitle")}
+        description={
+          borrowRejection
+            ? messages("budgets.borrowFor", {
+                amount: formatMoney(borrowRejection.budget.shortfall, locale),
+              })
+            : undefined
+        }
+      >
+        <div className="space-y-2">
+          {borrowError && (
+            <p
+              role="alert"
+              className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger"
+            >
+              {borrowError}
+            </p>
+          )}
+          {lenderCandidates.length === 0 ? (
+            <p className="text-sm text-muted">{messages("budgets.borrowNone")}</p>
+          ) : (
+            lenderCandidates.map(({ budget, remaining }) => (
+              <button
+                key={budget.id}
+                type="button"
+                disabled={borrowing}
+                onClick={() => void confirmBorrow({ budget, remaining })}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-line bg-bg1 px-4 py-3 text-left transition-colors hover:bg-surface2 disabled:opacity-60"
+              >
+                <span className="min-w-0 truncate text-sm font-medium text-ink">
+                  {budgetScopeName(budget)}
+                </span>
+                <span className="num shrink-0 text-sm text-muted">
+                  {messages("budgets.leftover", { amount: formatMoney(remaining, locale) })}
+                </span>
+              </button>
+            ))
+          )}
+          <div className="flex justify-end pt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={borrowing}
+              onClick={() => setBorrowDialogOpen(false)}
+            >
+              {common("cancel")}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

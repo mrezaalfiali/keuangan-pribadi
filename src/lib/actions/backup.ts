@@ -61,9 +61,14 @@ export async function restoreFinancialBackup(backup: unknown): Promise<BackupRes
   ) {
     return { ok: false, error: "backup.format" };
   }
+  if (backup.budget_borrows !== undefined && !Array.isArray(backup.budget_borrows)) {
+    return { ok: false, error: "backup.format" };
+  }
   if (backup.account.id !== user.id) return { ok: false, error: "backup.owner" };
 
-  const totalRows = BACKUP_TABLES.reduce((count, key) => count + (backup[key] as unknown[]).length, 0);
+  const totalRows =
+    BACKUP_TABLES.reduce((count, key) => count + (backup[key] as unknown[]).length, 0) +
+    (Array.isArray(backup.budget_borrows) ? backup.budget_borrows.length : 0);
   if (totalRows > 20000) return { ok: false, error: "backup.format" };
 
   const { data, error } = await supabase.rpc("restore_financial_backup", {

@@ -3,10 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import {
+  aggregateBorrows,
+  budgetEffectiveLimit,
   budgetLeftover,
   budgetSpend,
   isValidPeriod,
   nextPeriod,
+  type BudgetBorrowRow,
   type BudgetPeriod,
 } from "@/src/lib/budget";
 
@@ -180,11 +183,28 @@ export async function carryOverBudget(
     }
   );
 
+  // Pinjaman pada periode sumber ikut menggeser sisa yang boleh dibawa:
+  // yang dipinjamkan keluar berkurang, yang masuk bertambah. Tanpa ini,
+  // pemberi yang sudah meminjamkan sebagian sisanya justru membawa sisa
+  // yang nyatanya sudah dipakai peminjam, dan total hemat jadi tidak
+  // konsisten. Tabel pinjaman dari migrasi 0028 -- kalau belum ada,
+  // dihitung tanpa pinjaman seperti sebelumnya.
+  const { data: borrowRows, error: borrowError } = await supabase
+    .from("budget_borrows")
+    .select("from_budget_id, to_budget_id, amount")
+    .eq("user_id", user.id);
+  if (borrowError) {
+    console.error("Supabase budget borrow load failed during carry-over.", borrowError);
+  }
+  const borrowTotals = aggregateBorrows((borrowRows ?? []) as BudgetBorrowRow[]).get(
+    source.id
+  );
+
   // Sisa yang sudah ditutup tidak boleh terbawa: kuotanya sudah dianggap
   // dialihkan, jadi periode berikutnya hanya menerima batas dasarnya saja.
   const leftover = source.leftover_discarded
     ? 0
-    : budgetLeftover(source.limit_amount, spentTotal);
+    : budgetLeftover(budgetEffectiveLimit(source, spentTotal, borrowTotals), spentTotal);
   if (leftover <= 0) return { ok: false, error: "err.noLeftover" };
 
   const { data: alreadyCarried } = await supabase
@@ -299,5 +319,153 @@ export async function deleteBudget(
   if (error) return { ok: false, error: "err.generic" };
 
   revalidatePath(`/${locale}/budgets`);
+  return { ok: true };
+}
+
+export interface BorrowResult {
+  ok: boolean;
+  error?: string;
+  /** Id baris pinjaman -- diteruskan ke `addTransaction` untuk ditautkan. */
+  borrowId?: string;
+}
+
+/**
+ * Mencatat pinjaman sisa antar anggaran pada periode yang sama.
+ *
+ * `limit_amount` kedua pihak tidak disentuh: yang berubah hanya batas
+ * efektif baris terkait (lihat `budgetEffectiveLimit`). Semua syarat
+ * divalidasi ulang di server -- UI hanya memilih dan menampilkan nominal.
+ *
+ * `transactionId` diisi saat transaksi yang memicunya sudah ada (alur
+ * edit). Alur tambah mengirim null lalu menautkannya lewat `addTransaction`.
+ */
+export async function borrowBudget(
+  locale: string,
+  input: {
+    borrowerBudgetId: string;
+    lenderBudgetId: string;
+    /** Tanggal transaksi; kedua anggaran wajib mencakupnya. */
+    date: string;
+    amount: number;
+    transactionId?: number | null;
+  }
+): Promise<BorrowResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  if (input.borrowerBudgetId === input.lenderBudgetId) {
+    return { ok: false, error: "err.borrowSame" };
+  }
+  if (!isISODate(input.date)) return { ok: false, error: "err.period" };
+  if (!Number.isSafeInteger(input.amount) || input.amount <= 0) {
+    return { ok: false, error: "err.borrowAmount" };
+  }
+
+  const { data: budgets, error: budgetError } = await supabase
+    .from("budgets")
+    .select("id, scope, scope_id, limit_amount, starts_on, ends_on, leftover_discarded")
+    .in("id", [input.borrowerBudgetId, input.lenderBudgetId])
+    .eq("user_id", user.id);
+  if (budgetError) return { ok: false, error: "err.generic" };
+  const borrower = (budgets ?? []).find((row) => row.id === input.borrowerBudgetId);
+  const lender = (budgets ?? []).find((row) => row.id === input.lenderBudgetId);
+  if (!borrower || !lender) return { ok: false, error: "err.borrowNotFound" };
+
+  // Kedua periodenya harus mencakup tanggal transaksi yang sedang ditolak;
+  // pinjaman sendiri bebas lintas scope (kategori boleh dari vault).
+  if (
+    input.date < borrower.starts_on ||
+    input.date > borrower.ends_on ||
+    input.date < lender.starts_on ||
+    input.date > lender.ends_on
+  ) {
+    return { ok: false, error: "err.borrowPeriod" };
+  }
+  // Sisa yang sudah ditutup berarti keputusan eksplisit: kuotanya sudah
+  // dialihkan, jadi tidak boleh jadi peminjam maupun pemberi.
+  if (borrower.leftover_discarded || lender.leftover_discarded) {
+    return { ok: false, error: "err.borrowDiscarded" };
+  }
+
+  // Sisa pemberi dihitung ulang dari ledger dan pinjaman yang sudah
+  // berjalan -- tidak pernah dari angka yang dikirim UI.
+  const [spentResult, borrowResult] = await Promise.all([
+    supabase
+      .from("transactions")
+      .select("type, amount, category_id, vault_id, date")
+      .eq("user_id", user.id)
+      .eq("type", "expense")
+      .gte("date", lender.starts_on)
+      .lte("date", lender.ends_on),
+    supabase
+      .from("budget_borrows")
+      .select("from_budget_id, to_budget_id, amount")
+      .eq("user_id", user.id),
+  ]);
+  if (spentResult.error || borrowResult.error) {
+    if (borrowResult.error) {
+      console.error("Supabase budget borrow load failed.", borrowResult.error);
+    }
+    return { ok: false, error: "err.generic" };
+  }
+
+  const lenderSpent = budgetSpend(spentResult.data ?? [], lender);
+  const lenderTotals = aggregateBorrows(
+    (borrowResult.data ?? []) as BudgetBorrowRow[]
+  ).get(lender.id);
+  const remaining = budgetLeftover(
+    budgetEffectiveLimit(lender, lenderSpent, lenderTotals),
+    lenderSpent
+  );
+  if (input.amount > remaining) return { ok: false, error: "err.borrowRemaining" };
+
+  const { data: inserted, error: insertError } = await supabase
+    .from("budget_borrows")
+    .insert({
+      user_id: user.id,
+      from_budget_id: lender.id,
+      to_budget_id: borrower.id,
+      transaction_id: input.transactionId ?? null,
+      amount: input.amount,
+    })
+    .select("id")
+    .single();
+  if (insertError || !inserted) {
+    if (insertError) console.error("Supabase budget borrow insert failed.", insertError);
+    return { ok: false, error: "err.generic" };
+  }
+
+  revalidatePath(`/${locale}/budgets`);
+  revalidatePath(`/${locale}/dashboard`);
+  return { ok: true, borrowId: inserted.id };
+}
+
+/**
+ * Membatalkan satu pinjaman: sisa pemberi pulih, ruang peminjam menyusut
+ * kembali. Pinjaman yang menautkan transaksi tetap bisa dibatalkan manual
+ * -- yang terpakai tinggal membatalkan sendiri lewat tombol ini.
+ */
+export async function deleteBorrow(
+  locale: string,
+  borrowId: string
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+
+  const { error } = await supabase
+    .from("budget_borrows")
+    .delete()
+    .eq("id", borrowId)
+    .eq("user_id", user.id);
+  if (error) return { ok: false, error: "err.generic" };
+
+  revalidatePath(`/${locale}/budgets`);
+  revalidatePath(`/${locale}/dashboard`);
   return { ok: true };
 }

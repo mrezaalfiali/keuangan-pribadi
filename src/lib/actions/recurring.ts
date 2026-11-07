@@ -12,7 +12,14 @@ type ActionResult = {
   points?: number;
   unlockedAchievements?: Array<{ nameKey: string; points: number }>;
   rewardError?: boolean;
-  budget?: { scope: "category" | "vault"; remaining: number };
+  budget?: {
+    scope: "category" | "vault";
+    remaining: number;
+    /** Baris anggaran yang tertolak; UI memakainya sebagai peminjam. */
+    id: string;
+    /** Kekurangan setelah sisa dipakai; dasar nominal pinjaman. */
+    shortfall: number;
+  };
 };
 
 interface RecurringInput {
@@ -162,6 +169,14 @@ export async function recordRecurringTransaction(
     vaultId: string | null;
     note: string;
     allocationMode: "auto" | "single";
+  },
+  options?: {
+    /**
+     * Id `budget_borrows` yang menutup kekurangan anggaran transaksi ini.
+     * Ditautkan ke baris transaksi setelah RPC sukses supaya menghapus
+     * transaksi otomatis mengembalikan sisa pemberi (FK cascade).
+     */
+    borrowIds?: string[];
   }
 ): Promise<ActionResult> {
   const supabase = await createClient();
@@ -264,6 +279,22 @@ export async function recordRecurringTransaction(
   if (!Array.isArray(data) || typeof data[0]?.transaction_id !== "number") {
     console.error("Supabase recurring transaction RPC returned an invalid response.");
     return { ok: false, error: "err.generic" };
+  }
+
+  // Tautkan pinjaman yang menutup kekurangan anggaran. Gagal menaut
+  // tidak membatalkan transaksi yang sudah tercatat -- pinjaman tetap
+  // ada dan masih bisa dibatalkan manual dari halaman Anggaran.
+  const borrowIds = options?.borrowIds;
+  if (template.type === "expense" && borrowIds?.length) {
+    const { error: linkError } = await supabase
+      .from("budget_borrows")
+      .update({ transaction_id: data[0].transaction_id })
+      .in("id", borrowIds)
+      .eq("user_id", user.id)
+      .is("transaction_id", null);
+    if (linkError) {
+      console.error("Supabase budget borrow link failed.", linkError);
+    }
   }
 
   const { data: rewardData, error: rewardError } = await supabase.rpc("award_transaction_rewards");
