@@ -389,6 +389,7 @@
     "allResolved": "No leftovers awaiting a decision.",
     "showHistory": "Show history",
     "hideHistory": "Hide history",
+    "details": "Details",
     "discardLeftover": "Close leftover",
     "undoDiscard": "Undo close",
     "discardedNote": "Leftover closed; funds have been moved.",

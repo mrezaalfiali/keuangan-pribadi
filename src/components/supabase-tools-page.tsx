@@ -171,6 +171,13 @@ export function SupabaseToolsPage({ section }: Props) {
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
   const [showEndedHistory, setShowEndedHistory] = useState(false);
   const [isLargeScreen, setIsLargeScreen] = useState(false);
+  // Dropdown kartu di kolom kanan anggaran: mulai tertutup supaya halaman
+  // ringkas, klik judul untuk membuka (berlaku di semua ukuran layar).
+  const [upcomingOpen, setUpcomingOpen] = useState(false);
+  const [endedOpen, setEndedOpen] = useState(false);
+  // Override per baris "Batas Anggaran". Key yang tidak ada = ikut aturan
+  // default: baris Penuh/Terlampaui mulai tertutup, sisanya terbuka.
+  const [budgetRowOpen, setBudgetRowOpen] = useState<Record<string, boolean>>({});
   const [resetPhrase, setResetPhrase] = useState("");
   const [resetting, setResetting] = useState(false);
 
@@ -280,6 +287,14 @@ export function SupabaseToolsPage({ section }: Props) {
   /** Label untuk <option> anggaran; sama dengan yang dipakai halaman Transaksi. */
   function scopeOptionLabel(item: Vault | Category) {
     return resolveLabel(item, categoryName) ?? item.slug;
+  }
+
+  /** Nama kategori/vault sebuah anggaran; dipakai daftar ringkas kartu anggaran. */
+  function budgetScopeLabel(budget: Budget) {
+    const target = budget.scope === "vault"
+      ? vaults.find((vault) => vault.id === budget.scope_id)
+      : categories.find((category) => category.id === budget.scope_id);
+    return target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
   }
 
   /**
@@ -399,6 +414,34 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
 
   const pendingEndedBudgets = endedBudgets.filter((row) => leftoverOf(row) > 0 && !carriedOverIds.has(row.budget.id) && !row.budget.leftover_discarded);
   const visibleEnded = showEndedHistory ? endedBudgets : pendingEndedBudgets;
+
+  /**
+   * Nama unik untuk daftar ringkas saat kartu "Akan datang"/"Periode berakhir"
+   * ditutup: judul tetap terlihat beserta daftar nama kategorinya, tanpa detail.
+   *
+   * `endedNames` memakai `endedBudgets` (semua periode), bukan `visibleEnded` —
+   * daftar ringkas harus tetap berisi nama walau tidak ada sisa yang menunggu
+   * keputusan, kalau tidak kartu yang tertutup tampil kosong.
+   */
+  const upcomingNames = [...new Set(upcomingBudgets.map((row) => budgetScopeLabel(row.budget)))];
+  const endedNames = [...new Set(endedBudgets.map((row) => budgetScopeLabel(row.budget)))];
+
+  /**
+   * Baris "Batas Anggaran" terbuka atau tidak.
+   *
+   * Pilihan pengguna selalu menang; tanpa pilihan, status Penuh/Terlampaui
+   * mulai tertutup supaya yang tersisa di layar hanya baris yang masih berjalan.
+   */
+  function budgetRowExpanded(budget: Budget, spent: number) {
+    const override = budgetRowOpen[budget.id];
+    if (override !== undefined) return override;
+    const status = budgetDisplayStatus(budget, spent);
+    return status !== "full" && status !== "exceeded";
+  }
+
+  function toggleBudgetRow(id: string, expanded: boolean) {
+    setBudgetRowOpen((prev) => ({ ...prev, [id]: expanded }));
+  }
 
   /**
    * "Buat periode berikutnya": menyalin batas ke periode gaji berikutnya.
@@ -733,6 +776,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
             const discarded = budget.leftover_discarded;
             const effectiveLimit = budgetEffectiveLimit(budget, spent);
             const status = budgetDisplayStatus(budget, spent);
+            const rowOpen = budgetRowExpanded(budget, spent);
             const remaining = budgetLeftover(effectiveLimit, spent);
             const target = budget.scope === "vault"
               ? vaults.find((vault) => vault.id === budget.scope_id)
@@ -745,29 +789,33 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 && other.scope_id === budget.scope_id
                 && other.starts_on === following?.startsOn
             );
-            return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(effectiveLimit, locale)}</p></div><div className="flex shrink-0 items-center gap-1">{canCreateNext && following && <button type="button" disabled={saving} onClick={() => makeNextPeriod(budget, following)} title={t("makeNextPeriodTitle", { month: paydayLabel(following, locale) })} className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40"><Plus size={14} />{t("makeNextPeriod")}</button>}{!discarded && remaining > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}<button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:text-danger"><Trash2 size={16} /></button></div></div><Progress value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100} className="mt-3" indicatorClassName={status === "ok" ? undefined : "bg-danger"} /><div className="mt-2 flex items-center justify-between gap-3"><p className={`text-xs font-medium ${status === "exceeded" || status === "warning" || status === "full" ? "text-danger" : "text-muted"}`}>{t(status)}</p><p className={`num text-xs font-medium ${remaining > 0 ? "text-ink" : "text-faint"}`}>{t("leftover", { amount: money(remaining, locale) })}</p></div>{budget.rolled_over_from && <p className="mt-1 text-xs text-faint">{t("includesLeftover")}</p>}{discarded && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</li>;
+            return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p>{rowOpen && <><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(effectiveLimit, locale)}</p></>}</div><div className="flex shrink-0 items-center gap-1">{rowOpen && <>{canCreateNext && following && <button type="button" disabled={saving} onClick={() => makeNextPeriod(budget, following)} title={t("makeNextPeriodTitle", { month: paydayLabel(following, locale) })} className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40"><Plus size={14} />{t("makeNextPeriod")}</button>}{!discarded && remaining > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}<button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:text-danger"><Trash2 size={16} /></button></>}<button type="button" onClick={() => toggleBudgetRow(budget.id, !rowOpen)} aria-expanded={rowOpen} aria-label={t("details")} title={t("details")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink"><ChevronDown size={16} className={`transition-transform ${rowOpen ? "rotate-180" : ""}`} /></button></div></div><Progress value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100} className="mt-3" indicatorClassName={status === "ok" ? undefined : "bg-danger"} />{rowOpen && <><div className="mt-2 flex items-center justify-between gap-3"><p className={`text-xs font-medium ${status === "exceeded" || status === "warning" || status === "full" ? "text-danger" : "text-muted"}`}>{t(status)}</p><p className={`num text-xs font-medium ${remaining > 0 ? "text-ink" : "text-faint"}`}>{t("leftover", { amount: money(remaining, locale) })}</p></div>{budget.rolled_over_from && <p className="mt-1 text-xs text-faint">{t("includesLeftover")}</p>}{discarded && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</>}</li>;
           })}</ul>}</CardContent></Card>
 
-            {upcomingBudgets.length > 0 && <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink">{t("upcomingPeriods")}</h2><ul className="mt-3 divide-y divide-line">{upcomingBudgets.map((row) => {
+            {upcomingBudgets.length > 0 && <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={upcomingOpen} onClick={() => setUpcomingOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("upcomingPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${upcomingOpen ? "rotate-180" : ""}`} /></button></h2>{upcomingOpen ? <ul className="mt-3 divide-y divide-line">{upcomingBudgets.map((row) => {
               const target = row.budget.scope === "vault"
                 ? vaults.find((vault) => vault.id === row.budget.scope_id)
                 : categories.find((category) => category.id === row.budget.scope_id);
               const label = target ? scopeOptionLabel(target) : t(row.budget.scope === "vault" ? "scopeVault" : "scopeCategory");
               return <li key={row.budget.id} className="flex items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale, Number(today.slice(0, 4)))} · {money(row.budget.limit_amount, locale)}</p></div><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, row.budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="shrink-0 rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={16} /></button></li>;
-            })}</ul></CardContent></Card>}
+            })}</ul> : <ul className="mt-3 divide-y divide-line">{upcomingNames.map((name) => <li key={name} className="py-2 text-sm text-ink">{name}</li>)}</ul>}</CardContent></Card>}
 
-            <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink">{t("endedPeriods")}</h2><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <>{visibleEnded.length === 0 ? <p className="mt-4 text-sm text-muted">{t("allResolved")}</p> : <ul className="mt-3 divide-y divide-line">{visibleEnded.map((row) => {
+            <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={endedOpen} onClick={() => setEndedOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("endedPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${endedOpen ? "rotate-180" : ""}`} /></button></h2>{endedOpen ? <><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <>{visibleEnded.length === 0 ? <p className="mt-4 text-sm text-muted">{t("allResolved")}</p> : <ul className="mt-3 flex flex-col gap-2">{visibleEnded.map((row) => {
               const { budget, spent } = row;
               const leftover = leftoverOf(row);
               const alreadyCarried = carriedOverIds.has(budget.id);
               const discarded = budget.leftover_discarded;
+              // Predikat yang sama dengan `pendingEndedBudgets`: baris yang
+              // masih menunggu keputusan dibedakan warnanya dari yang sudah
+              // diproses (dibawa, ditutup, atau sisa 0) saat riwayat dibuka.
+              const isPending = leftover > 0 && !alreadyCarried && !discarded;
               const target = budget.scope === "vault"
                 ? vaults.find((vault) => vault.id === budget.scope_id)
                 : categories.find((category) => category.id === budget.scope_id);
               const label = target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
               const following = nextPeriod({ startsOn: budget.starts_on, endsOn: budget.ends_on });
-              return <li key={budget.id} className="py-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</div><div className="flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
-            })}</ul>}{endedBudgets.length > pendingEndedBudgets.length && <button type="button" onClick={() => setShowEndedHistory(!showEndedHistory)} aria-expanded={showEndedHistory} className="mt-3 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors">{showEndedHistory ? t("hideHistory") : t("showHistory")}</button>}</>}</CardContent></Card>
+              return <li key={budget.id} className={`py-4 -mx-3 px-3 rounded-xl border-l-2 ${isPending ? "border-accent bg-accent/[0.06]" : "border-transparent"}`}><div className="flex items-start justify-between gap-3"><div className={`min-w-0 ${isPending ? "" : "opacity-60"}`}><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(budget.limit_amount, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}</div><div className="flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
+            })}</ul>}{endedBudgets.length > pendingEndedBudgets.length && <button type="button" onClick={() => setShowEndedHistory(!showEndedHistory)} aria-expanded={showEndedHistory} className="mt-3 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors">{showEndedHistory ? t("hideHistory") : t("showHistory")}</button>}</>}</> : <ul className="mt-3 divide-y divide-line">{endedNames.map((name) => <li key={name} className="py-2 text-sm text-ink">{name}</li>)}</ul>}</CardContent></Card>
           </div>
         </section>}
 
