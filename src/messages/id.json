@@ -345,6 +345,7 @@
     "topup": "Isi",
     "deleteConfirm": "Hapus vault ini beserta saldonya?",
     "rename": "Ubah nama vault",
+    "actions": "Aksi vault",
     "groupTarget": "Punya Target",
     "groupNoTarget": "Tanpa Target",
     "nameTaken": "Sudah ada vault dengan nama tersebut."

@@ -345,6 +345,7 @@
     "topup": "Top Up",
     "deleteConfirm": "Delete this vault and its balance?",
     "rename": "Rename vault",
+    "actions": "Vault actions",
     "groupTarget": "With Target",
     "groupNoTarget": "No Target",
     "nameTaken": "A vault with that name already exists."

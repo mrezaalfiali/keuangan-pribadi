@@ -7,6 +7,7 @@ import {
   Calculator,
   ChevronDown,
   Download,
+  EllipsisVertical,
   Flame,
   LockKeyhole,
   LockKeyholeOpen,
@@ -171,6 +172,9 @@ export function SupabaseToolsPage({ section }: Props) {
   // supaya bisa dibatalkan (Esc) sebelum disimpan ke server.
   const [editingVaultId, setEditingVaultId] = useState<string | null>(null);
   const [editingVaultName, setEditingVaultName] = useState("");
+  // Menu dropdown aksi vault (ubah nama, kunci, hapus).
+  const [activeVaultMenuId, setActiveVaultMenuId] = useState<string | null>(null);
+  const vaultMenuRef = useRef<HTMLDivElement>(null);
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
   const [showEndedHistory, setShowEndedHistory] = useState(false);
   const [isLargeScreen, setIsLargeScreen] = useState(false);
@@ -191,6 +195,26 @@ export function SupabaseToolsPage({ section }: Props) {
     mediaQuery.addEventListener("change", updateScreenSize);
     return () => mediaQuery.removeEventListener("change", updateScreenSize);
   }, []);
+
+  useEffect(() => {
+    if (activeVaultMenuId === null) return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !vaultMenuRef.current?.contains(event.target)) {
+        setActiveVaultMenuId(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActiveVaultMenuId(null);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [activeVaultMenuId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -819,7 +843,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
           <div className="space-y-4">{vaults.length === 0 ? <Empty text={local("emptyVaults")} /> : [{ label: vaultText("groupTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) > 0), accent: true }, { label: vaultText("groupNoTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) <= 0), accent: false }].map((group) => group.items.length === 0 ? null : (<div key={group.label} className={`rounded-2xl border p-3 sm:p-4 ${group.accent ? "border-accent/45 bg-accent/[0.06]" : "border-line bg-surface2/60"}`}><h3 className={`mb-3 text-xs font-semibold uppercase tracking-widest ${group.accent ? "text-accent" : "text-muted"}`}>{group.label}</h3><div className="space-y-3">{group.items.map((vault) => {
             const balance = vaultBalances.get(vault.id) ?? 0;
             const target = vault.target_amount ?? 0;
-            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div>{editingVaultId === vault.id ? <div className="flex items-center gap-1.5"><Input value={editingVaultName} onChange={(event) => setEditingVaultName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitVaultRename(vault.id); } if (event.key === "Escape") setEditingVaultId(null); }} autoFocus maxLength={48} aria-label={t("rename")} className="h-8 w-40 rounded-lg text-sm" /><button type="button" disabled={saving} onClick={() => void submitVaultRename(vault.id)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2"><Check size={15} /></button><button type="button" disabled={saving} onClick={() => setEditingVaultId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2"><X size={15} /></button></div> : <h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3>}<p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="flex gap-1"><button type="button" disabled={saving} onClick={() => { setEditingVaultId(vault.id); setEditingVaultName(vault.name ?? scopeOptionLabel(vault)); }} aria-label={t("rename")} title={t("rename")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink"><Pencil size={17} /></button><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); })} aria-label={vault.is_locked ? t("unlock") : t("lock")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink">{vault.is_locked ? <LockKeyholeOpen size={17} /> : <LockKeyhole size={17} />}</button><button type="button" disabled={saving} onClick={() => { if (window.confirm(t("deleteConfirm"))) void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); }} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={17} /></button></div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}</CardContent></Card>;
+            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div>{editingVaultId === vault.id ? <div className="flex items-center gap-1.5"><Input value={editingVaultName} onChange={(event) => setEditingVaultName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitVaultRename(vault.id); } if (event.key === "Escape") setEditingVaultId(null); }} autoFocus maxLength={48} aria-label={t("rename")} className="h-8 w-40 rounded-lg text-sm" /><button type="button" disabled={saving} onClick={() => void submitVaultRename(vault.id)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2"><Check size={15} /></button><button type="button" disabled={saving} onClick={() => setEditingVaultId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2"><X size={15} /></button></div> : <h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3>}<p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="relative" ref={activeVaultMenuId === vault.id ? vaultMenuRef : undefined}><button type="button" disabled={saving || editingVaultId === vault.id} onClick={() => setActiveVaultMenuId(activeVaultMenuId === vault.id ? null : vault.id)} aria-label={t("actions")} aria-expanded={activeVaultMenuId === vault.id} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink disabled:opacity-40"><EllipsisVertical size={17} /></button>{activeVaultMenuId === vault.id && (<div className="absolute right-0 top-full z-30 mt-1 min-w-40 rounded-xl border border-line bg-surface p-1 shadow-lg"><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); setEditingVaultId(vault.id); setEditingVaultName(vault.name ?? scopeOptionLabel(vault)); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"><Pencil size={15} />{t("rename")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); }); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40">{vault.is_locked ? <LockKeyholeOpen size={15} /> : <LockKeyhole size={15} />}{vault.is_locked ? t("unlock") : t("lock")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); if (window.confirm(t("deleteConfirm"))) { void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); } }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={15} />{common("delete")}</button></div>)}</div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}</CardContent></Card>;
           })}</div></div>))}</div>
         </section>}
 
