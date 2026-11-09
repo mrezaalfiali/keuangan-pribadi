@@ -344,7 +344,7 @@
     "withdraw": "Withdraw",
     "topup": "Top Up",
     "deleteConfirm": "Delete this vault and its balance?",
-    "rename": "Rename vault",
+    "rename": "Rename",
     "actions": "Vault actions",
     "groupTarget": "With Target",
     "groupNoTarget": "No Target",
