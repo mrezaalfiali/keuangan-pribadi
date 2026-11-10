@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -300,6 +300,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [savingEdit, setSavingEdit] = useState(false);
   const [mobileActionsTxId, setMobileActionsTxId] = useState<number | null>(null);
   const mobileActionsMenuRef = useRef<HTMLDivElement>(null);
+  const [sourceMenuId, setSourceMenuId] = useState("");
+  const sourceMenuRef = useRef<HTMLDivElement>(null);
   const [type, setType] = useState<"income" | "expense" | "transfer">("expense");
   const [allocationMode, setAllocationMode] = useState<"auto" | "single">("auto");
   const [formVaultId, setFormVaultId] = useState("");
@@ -386,6 +388,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [mobileActionsTxId]);
+
+  useEffect(() => {
+    if (sourceMenuId === "") return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !sourceMenuRef.current?.contains(event.target)) {
+        setSourceMenuId("");
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSourceMenuId("");
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [sourceMenuId]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(min-width: 1024px)");
@@ -1722,9 +1744,6 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 }}
                 className="flex min-w-0 flex-1 items-start gap-3 text-left lg:cursor-default"
               >
-                <span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent">
-                  <CalendarClock size={18} />
-                </span>
                 <span className="min-w-0 flex-1">
                   <h2 className="font-display text-lg font-semibold text-ink">{txText("recurringTitle")}</h2>
                 </span>
@@ -2108,38 +2127,68 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <p className="truncate text-sm font-medium text-ink">{sourceLabel(summary)}</p>
-                          <p className="text-xs text-faint">
-                            {txText("sourceIncome")} {formatMoney(summary.income, locale)} · {txText("sourceExpense")} {formatMoney(summary.expense, locale)}
+                          <p className="flex flex-wrap items-center gap-1.5 text-xs text-faint">
+                            <ArrowDownLeft size={14} aria-hidden="true" className="text-accent" />
+                            <span className="sr-only">{txText("sourceIncome")}</span>
+                            {formatMoney(summary.income, locale)}
+                            <span aria-hidden="true">·</span>
+                            <ArrowUpRight size={14} aria-hidden="true" className="text-danger" />
+                            <span className="sr-only">{txText("sourceExpense")}</span>
+                            {formatMoney(summary.expense, locale)}
                           </p>
                         </div>
-                        <div className="flex shrink-0 items-center gap-1">
+                        <div
+                          ref={sourceMenuId === summary.source.id ? sourceMenuRef : null}
+                          className="relative shrink-0"
+                        >
                           <button
                             type="button"
-                            onClick={() => {
-                              setEditingSourceId(summary.source.id);
-                              setEditingSourceName(sourceLabel(summary));
-                              setSourceEditError("");
-                            }}
-                            aria-label={txText("editSource")}
+                            onClick={() =>
+                              setSourceMenuId(
+                                sourceMenuId === summary.source.id ? "" : summary.source.id
+                              )
+                            }
+                            aria-label={txText("sourceActions")}
+                            aria-expanded={sourceMenuId === summary.source.id}
                             className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-ink"
                           >
-                            <Pencil size={15} />
+                            <EllipsisVertical size={17} />
                           </button>
-                          {summary.source.slug !== "lainnya-in" && summary.source.slug !== "lainnya" && (
-                            <button
-                              type="button"
-                              onClick={() => void removeSource(summary)}
-                              aria-label={txText("deleteSource")}
-                              className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-danger"
-                            >
-                              <Trash2 size={15} />
-                            </button>
+                          {sourceMenuId === summary.source.id && (
+                            <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSourceMenuId("");
+                                  setEditingSourceId(summary.source.id);
+                                  setEditingSourceName(sourceLabel(summary));
+                                  setSourceEditError("");
+                                }}
+                                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
+                              >
+                                <Pencil size={15} />
+                                {txText("editSource")}
+                              </button>
+                              {summary.source.slug !== "lainnya-in" && summary.source.slug !== "lainnya" && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSourceMenuId("");
+                                    void removeSource(summary);
+                                  }}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                                >
+                                  <Trash2 size={15} />
+                                  {txText("deleteSource")}
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
                     )}
                     <p
-                      className={`num mt-3 text-lg font-semibold tracking-tight ${
+                      className={`num mt-4 border-t border-line pt-3 text-lg font-semibold tracking-tight ${
                         summary.balance > 0 ? "text-ink" : summary.balance < 0 ? "text-danger" : "text-faint"
                       }`}
                     >
