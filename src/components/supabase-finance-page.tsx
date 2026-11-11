@@ -2124,71 +2124,73 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                         {sourceEditError && <p className="text-xs text-danger">{sourceEditError}</p>}
                       </form>
                     ) : (
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium text-ink">{sourceLabel(summary)}</p>
-                          <p className="flex flex-wrap items-center gap-1.5 text-xs text-faint">
-                            <ArrowDownLeft size={14} aria-hidden="true" className="text-accent" />
-                            <span className="sr-only">{txText("sourceIncome")}</span>
-                            {formatMoney(summary.income, locale)}
-                            <span aria-hidden="true">·</span>
-                            <ArrowUpRight size={14} aria-hidden="true" className="text-danger" />
-                            <span className="sr-only">{txText("sourceExpense")}</span>
-                            {formatMoney(summary.expense, locale)}
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="min-w-0 truncate text-sm font-medium text-ink">
+                            {sourceLabel(summary)}
                           </p>
-                        </div>
-                        <div
-                          ref={sourceMenuId === summary.source.id ? sourceMenuRef : null}
-                          className="relative shrink-0"
-                        >
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setSourceMenuId(
-                                sourceMenuId === summary.source.id ? "" : summary.source.id
-                              )
-                            }
-                            aria-label={txText("sourceActions")}
-                            aria-expanded={sourceMenuId === summary.source.id}
-                            className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-ink"
+                          <div
+                            ref={sourceMenuId === summary.source.id ? sourceMenuRef : null}
+                            className="relative shrink-0"
                           >
-                            <EllipsisVertical size={17} />
-                          </button>
-                          {sourceMenuId === summary.source.id && (
-                            <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSourceMenuId("");
-                                  setEditingSourceId(summary.source.id);
-                                  setEditingSourceName(sourceLabel(summary));
-                                  setSourceEditError("");
-                                }}
-                                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
-                              >
-                                <Pencil size={15} />
-                                {txText("editSource")}
-                              </button>
-                              {summary.source.slug !== "lainnya-in" && summary.source.slug !== "lainnya" && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSourceMenuId(
+                                  sourceMenuId === summary.source.id ? "" : summary.source.id
+                                )
+                              }
+                              aria-label={txText("sourceActions")}
+                              aria-expanded={sourceMenuId === summary.source.id}
+                              className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-ink"
+                            >
+                              <EllipsisVertical size={17} />
+                            </button>
+                            {sourceMenuId === summary.source.id && (
+                              <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
                                 <button
                                   type="button"
                                   onClick={() => {
                                     setSourceMenuId("");
-                                    void removeSource(summary);
+                                    setEditingSourceId(summary.source.id);
+                                    setEditingSourceName(sourceLabel(summary));
+                                    setSourceEditError("");
                                   }}
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
                                 >
-                                  <Trash2 size={15} />
-                                  {txText("deleteSource")}
+                                  <Pencil size={15} />
+                                  {txText("editSource")}
                                 </button>
-                              )}
-                            </div>
-                          )}
+                                {summary.source.slug !== "lainnya-in" && summary.source.slug !== "lainnya" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSourceMenuId("");
+                                      void removeSource(summary);
+                                    }}
+                                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                                  >
+                                    <Trash2 size={15} />
+                                    {txText("deleteSource")}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
+                        <p className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-linestrong pt-2.5 text-xs text-faint">
+                          <ArrowDownLeft size={14} aria-hidden="true" className="text-accent" />
+                          <span className="sr-only">{txText("sourceIncome")}</span>
+                          {formatMoney(summary.income, locale)}
+                          <span aria-hidden="true">·</span>
+                          <ArrowUpRight size={14} aria-hidden="true" className="text-danger" />
+                          <span className="sr-only">{txText("sourceExpense")}</span>
+                          {formatMoney(summary.expense, locale)}
+                        </p>
                       </div>
                     )}
                     <p
-                      className={`num mt-4 border-t border-line pt-3 text-lg font-semibold tracking-tight ${
+                      className={`num mt-4 text-lg font-semibold tracking-tight ${
                         summary.balance > 0 ? "text-ink" : summary.balance < 0 ? "text-danger" : "text-faint"
                       }`}
                     >
