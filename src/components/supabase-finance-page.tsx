@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -332,6 +332,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [filterSearch, setFilterSearch] = useState("");
   const [sortOrder, setSortOrder] = useState<"date_desc" | "amount_desc" | "amount_asc">("date_desc");
   const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const [filtersMenuOpen, setFiltersMenuOpen] = useState(false);
+  const filtersMenuRef = useRef<HTMLDivElement>(null);
   const [formPrefill, setFormPrefill] = useState<{ type?: "income" | "expense"; amount?: number | string; date?: string; categoryId?: string; vaultId?: string; fundingSourceId?: string; note?: string; allocationMode?: "auto" | "single" } | null>(null);
   const [addFormKey, setAddFormKey] = useState(0);
   const [summaryMonth, setSummaryMonth] = useState(todayISO().slice(0, 7));
@@ -408,6 +410,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [sourceMenuId]);
+
+  useEffect(() => {
+    if (!filtersMenuOpen) return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !filtersMenuRef.current?.contains(event.target)) {
+        setFiltersMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFiltersMenuOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [filtersMenuOpen]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(min-width: 1024px)");
@@ -2427,14 +2449,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               )}
             </div>
             {section === "transactions" && (
-              <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-2 pb-4 sm:p-3 sm:pb-3 w-full max-w-full shrink-0">
-                <Field label={txText("filterSearch")}>
-                  <Input
-                    value={filterSearch}
-                    onChange={(event) => setFilterSearch(event.target.value)}
-                    placeholder={txText("filterSearchPlaceholder")}
-                  />
-                </Field>
+              <div
+                ref={filtersMenuRef}
+                className="mt-4 space-y-3 rounded-2xl border border-line bg-surface2/40 p-2 pb-4 sm:p-3 sm:pb-3 w-full max-w-full shrink-0"
+              >
                 <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
@@ -2464,7 +2482,42 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                   >
                     {txText("filterTransfer")}
                   </button>
-                  <div className="ml-auto flex flex-wrap items-center gap-1 mb-2 sm:mb-0">
+                  <div className="ml-auto">
+                    <button
+                      type="button"
+                      onClick={() => setFiltersMenuOpen((open) => !open)}
+                      aria-expanded={filtersMenuOpen}
+                      aria-controls="transaction-filters-panel"
+                      className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface2 hover:text-ink"
+                    >
+                      <SlidersHorizontal size={14} aria-hidden="true" />
+                      {txText("filterToggle")}
+                      {advancedFiltersCount > 0 && (
+                        <span className="rounded-full bg-accent/15 px-1.5 text-accent">
+                          {advancedFiltersCount}
+                        </span>
+                      )}
+                      <ChevronDown
+                        size={14}
+                        aria-hidden="true"
+                        className={`transition-transform ${filtersMenuOpen ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                  </div>
+                </div>
+                {filtersMenuOpen && (
+                <div
+                  id="transaction-filters-panel"
+                  className="space-y-3 rounded-xl border border-line bg-bg1/60 p-2 sm:p-3"
+                >
+                  <Field label={txText("filterSearch")}>
+                    <Input
+                      value={filterSearch}
+                      onChange={(event) => setFilterSearch(event.target.value)}
+                      placeholder={txText("filterSearchPlaceholder")}
+                    />
+                  </Field>
+                  <div className="flex flex-wrap items-center gap-1">
                     <button
                       type="button"
                       onClick={() => {
@@ -2539,28 +2592,22 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
                     >
                       {filtersExpanded ? txText("filterLess") : txText("filterMore")}
-                      {advancedFiltersCount > 0 && (
-                        <span className="rounded-full bg-accent/15 px-1.5 text-accent">
-                          {advancedFiltersCount}
-                        </span>
-                      )}
                       <ChevronDown
                         size={14}
                         aria-hidden="true"
                         className={`transition-transform ${filtersExpanded ? "rotate-180" : ""}`}
                       />
                     </button>
+                    {filtersActive && (
+                      <button
+                        type="button"
+                        onClick={resetFilters}
+                        className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
+                      >
+                        {txText("filterReset")}
+                      </button>
+                    )}
                   </div>
-                  {filtersActive && (
-                    <button
-                      type="button"
-                      onClick={resetFilters}
-                      className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-surface2 hover:text-ink"
-                    >
-                      {txText("filterReset")}
-                    </button>
-                  )}
-                </div>
                 {filtersExpanded && (
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 mb-1 sm:mb-0">
                   <Field label={txText("filterMonth")}>
@@ -2658,6 +2705,8 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       onChange={(event) => setFilterMaxAmount(event.target.value)}
                     />
                   </Field>
+                </div>
+                )}
                 </div>
                 )}
               </div>

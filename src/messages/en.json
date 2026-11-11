@@ -220,6 +220,7 @@
     "filterMore": "More filters",
     "filterLess": "Hide filters",
     "filterReset": "Reset filters",
+    "filterToggle": "Filter",
     "filterNoneMatch": "No transactions match these filters.",
     "filterCount": "{count} transactions",
     "monthNet": "Net",

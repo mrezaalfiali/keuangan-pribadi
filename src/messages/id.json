@@ -220,6 +220,7 @@
     "filterMore": "Filter lainnya",
     "filterLess": "Sembunyikan filter",
     "filterReset": "Reset filter",
+    "filterToggle": "Filter",
     "filterNoneMatch": "Tidak ada transaksi yang cocok dengan filter ini.",
     "filterCount": "{count} transaksi",
     "monthNet": "Selisih",
