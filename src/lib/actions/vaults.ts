@@ -154,6 +154,24 @@ export async function deleteVault(
   // pintu belakang. Buka kunci dulu sebelum menghapus.
   if (vault.is_locked) return { ok: false, error: "transactions.lockedError" };
 
+  // Utang pinjaman antar vault ikut terhapus oleh FK cascade (baik sebagai
+  // pemberi maupun peminjam), jadi bayar dulu sebelum menghapus -- kalau tidak,
+  // jejak siapa harus mengembalikan uang hilang bersama vaultnya.
+  const { data: openBorrows, error: openBorrowError } = await supabase
+    .from("vault_borrows")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("status", "open")
+    .or(`from_vault_id.eq.${vaultId},to_vault_id.eq.${vaultId}`)
+    .limit(1);
+  if (openBorrowError) {
+    console.error("Supabase vault borrow load failed during vault delete.", openBorrowError);
+    return { ok: false, error: "err.generic" };
+  }
+  if (openBorrows && openBorrows.length > 0) {
+    return { ok: false, error: "err.vaultBorrowOpen" };
+  }
+
   const { error } = await supabase
     .from("vaults")
     .delete()

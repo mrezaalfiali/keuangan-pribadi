@@ -13,6 +13,8 @@ import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/actions/transactions";
 import { borrowBudget } from "@/src/lib/actions/budgets";
+import { borrowVault } from "@/src/lib/actions/vault-borrows";
+import { eligibleVaultLenders, type VaultBorrowLenderCandidate } from "@/src/lib/vault-borrow";
 import { createIncomeSource, deleteIncomeSource, updateIncomeSource } from "@/src/lib/actions/categories";
 import {
   applySourceOverrides,
@@ -370,6 +372,27 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [borrowDialogOpen, setBorrowDialogOpen] = useState(false);
   const [borrowing, setBorrowing] = useState(false);
   const [borrowError, setBorrowError] = useState("");
+  /**
+   * Penolakan dana vault (saldo atau kolam sumber kurang) yang masih bisa
+   * ditutup lewat pinjaman antar vault. Menyimpan form yang sedang terpasang
+   * supaya setelah transfer pinjam tercatat, simpan bisa diulang otomatis
+   * tanpa mengisi ulang -- pola yang sama seperti penolakan anggaran.
+   */
+  const [vaultBorrowRejection, setVaultBorrowRejection] = useState<{
+    kind: "add" | "edit" | "recurring";
+    form: HTMLFormElement;
+    editTxId: number | null;
+    /** Template yang sedang dicatat; hanya untuk penolakan occurrence recurring. */
+    template: RecurringTransaction | null;
+    vaultShortfall: { vaultId: string; shortfall: number };
+    /** Sumber dana expense yang ditolak; jadi sumber transfer pinjam. */
+    fundingSourceId: string;
+    /** Angka pinjaman anggaran yang sudah pernah dicoba pada percobaan ini. */
+    borrowIds: string[];
+  } | null>(null);
+  const [vaultBorrowDialogOpen, setVaultBorrowDialogOpen] = useState(false);
+  const [vaultBorrowing, setVaultBorrowing] = useState(false);
+  const [vaultBorrowError, setVaultBorrowError] = useState("");
 
   useEffect(() => {
     if (mobileActionsTxId === null) return;
@@ -892,6 +915,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             borrowIds,
           });
           setBorrowDialogOpen(true);
+        } else if (result.vaultShortfall) {
+          // Guard dana vault: kekurangannya bisa ditutup dengan meminjam
+          // dari vault lain lewat transfer yang tercatat di riwayat.
+          setVaultBorrowRejection({
+            kind: "recurring",
+            form,
+            editTxId: null,
+            template,
+            vaultShortfall: result.vaultShortfall,
+            fundingSourceId: String(data.get("fundingSourceId") ?? ""),
+            borrowIds,
+          });
+          setVaultBorrowDialogOpen(true);
         }
         return;
       }
@@ -1142,6 +1178,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             borrowIds,
           });
           setBorrowDialogOpen(true);
+        } else if (result.vaultShortfall) {
+          // Guard dana vault: kekurangannya bisa ditutup dengan meminjam
+          // dari vault lain lewat transfer yang tercatat di riwayat.
+          setVaultBorrowRejection({
+            kind: "add",
+            form,
+            editTxId: null,
+            template: null,
+            vaultShortfall: result.vaultShortfall,
+            fundingSourceId: fundingSourceId ?? "",
+            borrowIds,
+          });
+          setVaultBorrowDialogOpen(true);
         }
         return;
       }
@@ -1192,7 +1241,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     try {
       const result = await deleteTransaction(locale, id);
       if (!result.ok) {
-        setError(result.error === "transactions.lockedError" ? txText("lockedError") : settings("deleteError"));
+        if (result.error === "transactions.lockedError") setError(txText("lockedError"));
+        else if (result.error === "err.vaultBorrowTransfer") setError(messages("vaults.errBorrowTransfer"));
+        else setError(settings("deleteError"));
         return;
       }
       await load();
@@ -1308,6 +1359,20 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             borrowIds: [],
           });
           setBorrowDialogOpen(true);
+        } else if (result.vaultShortfall) {
+          // Guard dana vault pada expense: kekurangannya bisa ditutup dengan
+          // meminjam dari vault lain; penolakan edit pemasukan tidak ikut
+          // (payloadnya memang hanya dibuat untuk expense).
+          setVaultBorrowRejection({
+            kind: "edit",
+            form,
+            editTxId: editingTransaction.id,
+            template: null,
+            vaultShortfall: result.vaultShortfall,
+            fundingSourceId: String(formData.get("fundingSourceId") ?? ""),
+            borrowIds: [],
+          });
+          setVaultBorrowDialogOpen(true);
         }
         return;
       }
@@ -1337,6 +1402,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setBorrowRejection(null);
     setBorrowDialogOpen(false);
     setBorrowError("");
+    setVaultBorrowRejection(null);
+    setVaultBorrowDialogOpen(false);
+    setVaultBorrowError("");
   }
 
   /**
@@ -1365,6 +1433,20 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
+  function vaultBorrowErrorMessage(code: string | undefined) {
+    switch (code) {
+      case "err.vaultBorrowAmount": return messages("vaults.errBorrowAmount");
+      case "err.vaultBorrowSame": return messages("vaults.errBorrowSame");
+      case "err.vaultBorrowNotFound": return messages("vaults.errBorrowNotFound");
+      case "err.vaultLenderBalance": return messages("vaults.errLenderBalance");
+      case "err.vaultLenderPool": return messages("vaults.errLenderPool");
+      case "transactions.noSource": return emptySourceHint;
+      case "transactions.lockedError": return txText("lockedError");
+      case "err.auth": return txText("authError");
+      default: return settings("saveError");
+    }
+  }
+
   const lenderCandidates = useMemo(() => {
     if (!borrowRejection) return [];
     const borrower = budgets.find((row) => row.id === borrowRejection.budget.id);
@@ -1377,6 +1459,21 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       borrowRejection.date
     );
   }, [borrowRejection, budgets, transactions, budgetBorrows]);
+
+  /**
+   * Kandidat pemberi pinjaman vault: vault lain yang bisa mengeluarkan uang
+   * untuk sumber dana yang ditolak. Dihitung dari state klien (sumber pinjaman
+   * sudah terpasang di form); server tetap menghitung ulang semua syaratnya.
+   */
+  const vaultLenderCandidates = useMemo(() => {
+    if (!vaultBorrowRejection) return [];
+    return eligibleVaultLenders({
+      borrowerVaultId: vaultBorrowRejection.vaultShortfall.vaultId,
+      sourceId: vaultBorrowRejection.fundingSourceId,
+      vaults,
+      transactions,
+    });
+  }, [vaultBorrowRejection, vaults, transactions]);
 
   /**
    * Label anggaran untuk daftar pemberi pinjaman, berprefix jenis scope
@@ -1448,6 +1545,51 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       setBorrowError(settings("saveError"));
     } finally {
       setBorrowing(false);
+    }
+  }
+
+  /**
+   * Meminjam dari satu vault lalu menyimpan ulang transaksi yang tadinya
+   * ditolak. Setelah transfer pinjam tercatat, `load()` memperbarui saldo dan
+   * kolam di state supaya kandidat pemberi yang dihitung ulang tidak memakai
+   * angka lama (server tetap penentu). Kalau masih kurang, penolakan baru
+   * datang dari simpan berikutnya dan dialog terbuka lagi -- pinjam boleh
+   * berulang dari beberapa vault sampai transaksinya muat.
+   */
+  async function confirmVaultBorrow(lender: VaultBorrowLenderCandidate) {
+    if (!vaultBorrowRejection || vaultBorrowing) return;
+    const rejection = vaultBorrowRejection;
+    const amount = Math.min(rejection.vaultShortfall.shortfall, lender.capacity);
+    if (amount <= 0) return;
+    setVaultBorrowing(true);
+    setVaultBorrowError("");
+    try {
+      const result = await borrowVault(locale, {
+        borrowerVaultId: rejection.vaultShortfall.vaultId,
+        lenderVaultId: lender.vault.id,
+        fundingSourceId: rejection.fundingSourceId,
+        amount,
+      });
+      if (!result.ok) {
+        setVaultBorrowError(vaultBorrowErrorMessage(result.error));
+        return;
+      }
+      setVaultBorrowDialogOpen(false);
+      // Saldo pemberi dan kolam sumbernya sudah berubah; muat ulang dulu
+      // sebelum simpan diulang supaya penawaran berikutnya tidak basi.
+      await load();
+      if (rejection.kind === "add") {
+        await runAddTransaction(rejection.form, rejection.borrowIds);
+      } else if (rejection.kind === "edit") {
+        await runEditTransaction(rejection.form);
+      } else if (rejection.template) {
+        await runRecurringRecord(rejection.template, rejection.form, rejection.borrowIds);
+      }
+    } catch (vaultBorrowActionError) {
+      console.error("Supabase vault borrow failed.", vaultBorrowActionError);
+      setVaultBorrowError(settings("saveError"));
+    } finally {
+      setVaultBorrowing(false);
     }
   }
 
@@ -3070,6 +3212,59 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               variant="ghost"
               disabled={borrowing}
               onClick={() => setBorrowDialogOpen(false)}
+            >
+              {common("cancel")}
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+      <Dialog
+        open={vaultBorrowDialogOpen}
+        onClose={() => setVaultBorrowDialogOpen(false)}
+        title={messages("vaults.borrowTitle")}
+        description={
+          vaultBorrowRejection
+            ? messages("vaults.borrowFor", {
+                amount: formatMoney(vaultBorrowRejection.vaultShortfall.shortfall, locale),
+              })
+            : undefined
+        }
+      >
+        <div className="space-y-2">
+          {vaultBorrowError && (
+            <p
+              role="alert"
+              className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger"
+            >
+              {vaultBorrowError}
+            </p>
+          )}
+          {vaultLenderCandidates.length === 0 ? (
+            <p className="text-sm text-muted">{messages("vaults.borrowNone")}</p>
+          ) : (
+            vaultLenderCandidates.map(({ vault, capacity }) => (
+              <button
+                key={vault.id}
+                type="button"
+                disabled={vaultBorrowing}
+                onClick={() => void confirmVaultBorrow({ vault, capacity })}
+                className="flex w-full items-center justify-between gap-3 rounded-xl border border-line bg-bg1 px-4 py-3 text-left transition-colors hover:bg-surface2 disabled:opacity-60"
+              >
+                <span className="min-w-0 truncate text-sm font-medium text-ink">
+                  {vaultLabel(vault)}
+                </span>
+                <span className="num shrink-0 text-sm text-muted">
+                  {messages("vaults.borrowAvailable", { amount: formatMoney(capacity, locale) })}
+                </span>
+              </button>
+            ))
+          )}
+          <div className="flex justify-end pt-1">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={vaultBorrowing}
+              onClick={() => setVaultBorrowDialogOpen(false)}
             >
               {common("cancel")}
             </Button>

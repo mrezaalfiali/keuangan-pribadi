@@ -41,6 +41,8 @@ import { SocialLinks } from "@/src/components/social-links";
 import { Field, Input } from "@/src/components/ui/input";
 import { Progress } from "@/src/components/ui/progress";
 import { createVault, deleteVault, toggleVaultLock, updateVault } from "@/src/lib/actions/vaults";
+import { repayVaultBorrow } from "@/src/lib/actions/vault-borrows";
+import { type VaultBorrowRow } from "@/src/lib/vault-borrow";
 import { carryOverBudget, copyBudgetPeriod, deleteBorrow, deleteBudget, saveBudget, setLeftoverDiscarded } from "@/src/lib/actions/budgets";
 import { deleteAllocationRule, saveAllocationRule, setActiveRule } from "@/src/lib/actions/allocation";
 import { saveDisplayName } from "@/src/lib/actions/profile";
@@ -138,6 +140,11 @@ export function SupabaseToolsPage({ section }: Props) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [budgetBorrows, setBudgetBorrows] = useState<BudgetBorrow[]>([]);
+  /** Utang pinjaman antar vault; hanya yang tampil di kartu vault yang dibaca. */
+  const [vaultBorrows, setVaultBorrows] = useState<VaultBorrowRow[]>([]);
+  /** Baris utang yang sedang dibuka input nominal bayarnya (inline, satu per kartu). */
+  const [payingBorrowId, setPayingBorrowId] = useState<string | null>(null);
+  const [repayAmount, setRepayAmount] = useState("");
   const [categories, setCategories] = useState<Category[]>([]);
   const [rules, setRules] = useState<RuleWithSlots[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
@@ -228,7 +235,7 @@ export function SupabaseToolsPage({ section }: Props) {
       setUserId(user.id);
       setEmail(user.email ?? "");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult] = await Promise.all([
+      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult, vaultBorrowResult] = await Promise.all([
         supabase.from("vaults").select("*").eq("user_id", user.id).order("priority"),
         supabase.from("transactions").select("*").eq("user_id", user.id).order("date", { ascending: false }),
         supabase.from("budgets").select("*").eq("user_id", user.id).order("starts_on", { ascending: false }),
@@ -242,6 +249,9 @@ export function SupabaseToolsPage({ section }: Props) {
         // Migrasi 0028 dijalankan manual; tanpa tabel pinjaman, daftar anggaran
         // tetap harus tampil -- kosong bukan kegagalan.
         supabase.from("budget_borrows").select("*").eq("user_id", user.id),
+        // Migrasi 0030 juga manual; tanpa tabel utang, kartu vault tetap tampil
+        // tanpa catatan utang -- kosong bukan kegagalan.
+        supabase.from("vault_borrows").select("*").eq("user_id", user.id),
       ]);
       const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
@@ -265,6 +275,10 @@ export function SupabaseToolsPage({ section }: Props) {
         logSupabaseError("tools.loadBudgetBorrows", borrowResult.error);
       }
       setBudgetBorrows((borrowResult.data ?? []) as BudgetBorrow[]);
+      if (vaultBorrowResult.error) {
+        logSupabaseError("tools.loadVaultBorrows", vaultBorrowResult.error);
+      }
+      setVaultBorrows((vaultBorrowResult.data ?? []) as VaultBorrowRow[]);
     } catch (loadError) {
       logSupabaseError("tools.load", loadError);
       setError(settings("connectionError"));
@@ -389,6 +403,109 @@ export function SupabaseToolsPage({ section }: Props) {
   }
 
   /**
+   * Bayar utang pinjaman vault: nominal divalidasi dua kali -- di sini untuk
+   * umpan balik cepat (dibatasi `min(sisa utang, saldo peminjam)`), di server
+   * dengan data segar. Kegagalannya lewat `actionErrorMessage` di
+   * `completeAction`, sama seperti aksi vault lain.
+   */
+  async function submitRepay(borrow: VaultBorrowRow) {
+    const raw = Number(repayAmount);
+    const pay = Math.trunc(raw);
+    if (!Number.isSafeInteger(raw) || pay <= 0) {
+      setError(vaultText("errRepayAmount"));
+      return;
+    }
+    const balance = vaultBalances.get(borrow.to_vault_id) ?? 0;
+    if (pay > borrow.outstanding) {
+      setError(vaultText("errRepayOutstanding"));
+      return;
+    }
+    if (pay > balance) {
+      setError(vaultText("errRepayBalance"));
+      return;
+    }
+    setPayingBorrowId(null);
+    await completeAction(async () => {
+      const result = await repayVaultBorrow(locale, borrow.id, pay);
+      if (!result.ok) throw new Error(result.error);
+      setNotice(vaultText("repayDone"));
+    });
+  }
+
+  /**
+   * Catatan utang pada kartu vault: peminjam melihat sisa utangnya ke
+   * pemberinya (dilengkapi input bayar inline; pembayaran boleh sebagian),
+   * pemberi melihat berapa yang masih dipinjam darinya. Utang yang sudah
+   * lunas tidak ditampilkan -- transfer riwayatnya tetap ada sendiri.
+   */
+  function vaultDebtBlock(vault: Vault) {
+    const rows = vaultBorrows.filter(
+      (borrow) =>
+        borrow.status === "open" &&
+        (borrow.to_vault_id === vault.id || borrow.from_vault_id === vault.id)
+    );
+    if (rows.length === 0) return null;
+    return (
+      <div className="mt-4 space-y-2 border-t border-line pt-3">
+        {rows.map((borrow) => {
+          const isBorrower = borrow.to_vault_id === vault.id;
+          const other = vaults.find(
+            (row) => row.id === (isBorrower ? borrow.from_vault_id : borrow.to_vault_id)
+          );
+          const otherLabel = other ? scopeOptionLabel(other) : "";
+          const paying = payingBorrowId === borrow.id;
+          return (
+            <div key={borrow.id} className="flex items-center justify-between gap-2">
+              <span className={`min-w-0 truncate text-xs ${isBorrower ? "text-danger" : "text-accent"}`}>
+                {isBorrower
+                  ? vaultText("debtBorrowed", { name: otherLabel, amount: money(borrow.outstanding, locale) })
+                  : vaultText("debtLent", { name: otherLabel, amount: money(borrow.outstanding, locale) })}
+              </span>
+              {isBorrower && (paying ? (
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <Input
+                    type="number"
+                    min="1"
+                    max={Math.min(borrow.outstanding, vaultBalances.get(vault.id) ?? 0)}
+                    step="1"
+                    inputMode="numeric"
+                    autoFocus
+                    value={repayAmount}
+                    onChange={(event) => setRepayAmount(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setPayingBorrowId(null);
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void submitRepay(borrow);
+                      }
+                    }}
+                    aria-label={vaultText("repayPlaceholder")}
+                    className="h-8 w-28 rounded-lg text-sm"
+                  />
+                  <button type="button" disabled={saving} onClick={() => void submitRepay(borrow)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2 disabled:opacity-40"><Check size={15} /></button>
+                  <button type="button" disabled={saving} onClick={() => setPayingBorrowId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2 disabled:opacity-40"><X size={15} /></button>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => {
+                    setRepayAmount("");
+                    setPayingBorrowId(borrow.id);
+                  }}
+                  className="shrink-0 rounded-lg border border-line px-2 py-1 text-[11px] text-muted hover:bg-surface2 disabled:opacity-40"
+                >
+                  {vaultText("repay")}
+                </button>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  /**
  * Memetakan kode error dari action ke pesan yang bisa dibaca.
  *
  * Tanpa ini semua kegagalan jadi `settings.saveError`, termasuk
@@ -432,6 +549,12 @@ function actionErrorMessage(code: unknown) {
   if (code === "vaults.nameTaken") return vaultText("nameTaken");
   if (code === "transactions.lockedError") return txText("lockedError");
   if (code === "settings.displayNameInvalid") return settings("displayNameInvalid");
+  if (code === "err.vaultBorrowOpen") return vaultText("errBorrowOpen");
+  if (code === "err.vaultRepayAmount") return vaultText("errRepayAmount");
+  if (code === "err.vaultRepayOutstanding") return vaultText("errRepayOutstanding");
+  if (code === "err.vaultRepayClosed") return vaultText("errRepayClosed");
+  if (code === "err.vaultRepayStale") return vaultText("errRepayStale");
+  if (code === "err.vaultRepayBalance") return vaultText("errRepayBalance");
   return settings("saveError");
 }
 
@@ -844,7 +967,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
           <div className="space-y-4">{vaults.length === 0 ? <Empty text={local("emptyVaults")} /> : [{ label: vaultText("groupTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) > 0), accent: true }, { label: vaultText("groupNoTarget"), items: vaults.filter((vault) => (vault.target_amount ?? 0) <= 0), accent: false }].map((group) => group.items.length === 0 ? null : (<div key={group.label} className={`rounded-2xl border p-3 sm:p-4 ${group.accent ? "border-accent/45 bg-accent/[0.06]" : "border-line bg-surface2/60"}`}><h3 className={`mb-3 text-xs font-semibold uppercase tracking-widest ${group.accent ? "text-accent" : "text-muted"}`}>{group.label}</h3><div className="space-y-3">{group.items.map((vault) => {
             const balance = vaultBalances.get(vault.id) ?? 0;
             const target = vault.target_amount ?? 0;
-            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div>{editingVaultId === vault.id ? <div className="flex items-center gap-1.5"><Input value={editingVaultName} onChange={(event) => setEditingVaultName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitVaultRename(vault.id); } if (event.key === "Escape") setEditingVaultId(null); }} autoFocus maxLength={48} aria-label={t("rename")} className="h-8 w-40 rounded-lg text-sm" /><button type="button" disabled={saving} onClick={() => void submitVaultRename(vault.id)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2"><Check size={15} /></button><button type="button" disabled={saving} onClick={() => setEditingVaultId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2"><X size={15} /></button></div> : <h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3>}<p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="relative" ref={activeVaultMenuId === vault.id ? vaultMenuRef : undefined}><button type="button" disabled={saving || editingVaultId === vault.id} onClick={() => setActiveVaultMenuId(activeVaultMenuId === vault.id ? null : vault.id)} aria-label={t("actions")} aria-expanded={activeVaultMenuId === vault.id} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink disabled:opacity-40"><EllipsisVertical size={17} /></button>{activeVaultMenuId === vault.id && (<div className="absolute right-0 top-full z-30 mt-1 min-w-40 rounded-xl border border-line bg-surface p-1 shadow-lg"><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); setEditingVaultId(vault.id); setEditingVaultName(vault.name ?? scopeOptionLabel(vault)); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"><Pencil size={15} />{t("rename")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); }); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40">{vault.is_locked ? <LockKeyholeOpen size={15} /> : <LockKeyhole size={15} />}{vault.is_locked ? t("unlock") : t("lock")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); if (window.confirm(t("deleteConfirm"))) { void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); } }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={15} />{common("delete")}</button></div>)}</div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}</CardContent></Card>;
+            return <Card key={vault.id}><CardContent className="p-5"><div className="flex items-start justify-between gap-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Wallet size={18} /></span><div>{editingVaultId === vault.id ? <div className="flex items-center gap-1.5"><Input value={editingVaultName} onChange={(event) => setEditingVaultName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitVaultRename(vault.id); } if (event.key === "Escape") setEditingVaultId(null); }} autoFocus maxLength={48} aria-label={t("rename")} className="h-8 w-40 rounded-lg text-sm" /><button type="button" disabled={saving} onClick={() => void submitVaultRename(vault.id)} aria-label={common("save")} className="rounded-lg p-1.5 text-accent hover:bg-surface2"><Check size={15} /></button><button type="button" disabled={saving} onClick={() => setEditingVaultId(null)} aria-label={common("cancel")} className="rounded-lg p-1.5 text-muted hover:bg-surface2"><X size={15} /></button></div> : <h3 className="font-semibold text-ink">{scopeOptionLabel(vault)}</h3>}<p className="text-xs text-muted">{vault.is_locked ? t("locked") : t("unlocked")}</p></div></div><div className="relative" ref={activeVaultMenuId === vault.id ? vaultMenuRef : undefined}><button type="button" disabled={saving || editingVaultId === vault.id} onClick={() => setActiveVaultMenuId(activeVaultMenuId === vault.id ? null : vault.id)} aria-label={t("actions")} aria-expanded={activeVaultMenuId === vault.id} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink disabled:opacity-40"><EllipsisVertical size={17} /></button>{activeVaultMenuId === vault.id && (<div className="absolute right-0 top-full z-30 mt-1 min-w-40 rounded-xl border border-line bg-surface p-1 shadow-lg"><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); setEditingVaultId(vault.id); setEditingVaultName(vault.name ?? scopeOptionLabel(vault)); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"><Pencil size={15} />{t("rename")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); void completeAction(async () => { const result = await toggleVaultLock(locale, vault.id, !vault.is_locked); if (!result.ok) throw new Error(result.error); }); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40">{vault.is_locked ? <LockKeyholeOpen size={15} /> : <LockKeyhole size={15} />}{vault.is_locked ? t("unlock") : t("lock")}</button><button type="button" disabled={saving} onClick={() => { setActiveVaultMenuId(null); if (window.confirm(t("deleteConfirm"))) { void completeAction(async () => { const result = await deleteVault(locale, vault.id); if (!result.ok) throw new Error(result.error); }); } }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-danger hover:bg-danger/10 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={15} />{common("delete")}</button></div>)}</div></div><div className="mt-4 flex justify-between text-sm"><span className="text-muted">{t("balance")}</span><span className="num font-semibold text-ink">{money(balance, locale)}</span></div>{target > 0 && <><Progress value={balance / target * 100} className="mt-3" /><p className="mt-2 text-xs text-muted">{t("target")}: {money(target, locale)} · {Math.round(Math.min(balance / target * 100, 100))}%</p></>}{vaultDebtBlock(vault)}</CardContent></Card>;
           })}</div></div>))}</div>
         </section>}
 

@@ -96,7 +96,7 @@ body {
 }
 
 .rise-in {
-  animation: riseIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: riseIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) backwards;
 }
 
 /* Maskot koin bertunas (login/daftar) */

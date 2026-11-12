@@ -5,6 +5,8 @@ import { createClient } from "@/src/lib/supabase/server";
 import { todayJakartaISO } from "@/src/lib/recurring";
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
+import { loadVaultShortfall } from "@/src/lib/vault-guard";
+import type { VaultShortfallPayload } from "@/src/lib/vault-borrow";
 
 type ActionResult = {
   ok: boolean;
@@ -20,6 +22,8 @@ type ActionResult = {
     /** Kekurangan setelah sisa dipakai; dasar nominal pinjaman. */
     shortfall: number;
   };
+  /** Kekurangan saldo/kolam vault; UI menawarkan pinjaman antar vault. */
+  vaultShortfall?: VaultShortfallPayload;
 };
 
 interface RecurringInput {
@@ -221,7 +225,16 @@ export async function recordRecurringTransaction(
     // hanya boleh memakai uang sumber yang benar-benar ada di vault itu.
     const balances = computeSourceVaultBalances((rows ?? []) as PairTransaction[]);
     if (sourceVaultBalance(balances, input.fundingSourceId, input.vaultId) < amount) {
-      return { ok: false, error: "transactions.sourceNotInVault" };
+      const vaultShortfall = await loadVaultShortfall(supabase, user.id, {
+        vaultId: input.vaultId,
+        fundingSourceId: input.fundingSourceId,
+        amount,
+      });
+      return {
+        ok: false,
+        error: "transactions.sourceNotInVault",
+        ...(vaultShortfall ? { vaultShortfall } : {}),
+      };
     }
 
     const budgetGuard = await checkExpenseBudget(supabase, user.id, {
@@ -272,6 +285,25 @@ export async function recordRecurringTransaction(
   if (error) {
     console.error("Supabase recurring transaction record failed.", { code: error.code, message: error.message });
     if (error.message.startsWith("err.") || error.message.startsWith("transactions.")) {
+      // Guard dana vault hanya mengirim kode; sisipkan angka kekurangannya
+      // supaya penolakan bisa ditawarkan pinjaman antar vault -- hanya untuk
+      // expense, karena uang yang kurang bukan masalah pemasukan berulang.
+      if (
+        template.type === "expense" &&
+        (error.message === "transactions.insufficient" ||
+          error.message === "transactions.sourceNotInVault")
+      ) {
+        const vaultShortfall = await loadVaultShortfall(supabase, user.id, {
+          vaultId: input.vaultId,
+          fundingSourceId: input.fundingSourceId,
+          amount,
+        });
+        return {
+          ok: false,
+          error: error.message,
+          ...(vaultShortfall ? { vaultShortfall } : {}),
+        };
+      }
       return { ok: false, error: error.message };
     }
     return { ok: false, error: "err.generic" };

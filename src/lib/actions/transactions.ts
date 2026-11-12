@@ -14,6 +14,8 @@ import {
   type BudgetBorrowRow,
 } from "@/src/lib/budget";
 import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
+import { loadVaultShortfall } from "@/src/lib/vault-guard";
+import type { VaultShortfallPayload } from "@/src/lib/vault-borrow";
 import type { AllocationSlot, Transaction } from "../types";
 
 export interface TxResult {
@@ -30,6 +32,8 @@ export interface TxResult {
     /** Kekurangan setelah sisa dipakai; dasar nominal pinjaman. */
     shortfall: number;
   };
+  /** Kekurangan saldo/kolam vault; UI menawarkan pinjaman antar vault. */
+  vaultShortfall?: VaultShortfallPayload;
 }
 
 interface RewardPayload {
@@ -145,7 +149,19 @@ export async function addTransaction(
     // saldonya cukup. Tanpa ini, kunci vault bisa dilewati lewat sumber
     // pemasukan, dan saldo vault bisa menjadi negatif.
     const vaultCheck = await checkExpenseVault(supabase, user.id, input.vaultId ?? null, amount);
-    if (vaultCheck) return { ok: false, error: vaultCheck };
+    if (vaultCheck) {
+      // Penolakan soal dana dilengkapi angka kekurangannya supaya UI bisa
+      // menawarkan pinjaman antar vault; kunci/vault-hilang tetap polos.
+      const vaultShortfall =
+        vaultCheck === "transactions.insufficient"
+          ? await loadVaultShortfall(supabase, user.id, {
+              vaultId: input.vaultId ?? null,
+              fundingSourceId: input.fundingSourceId ?? null,
+              amount,
+            })
+          : null;
+      return { ok: false, error: vaultCheck, ...(vaultShortfall ? { vaultShortfall } : {}) };
+    }
     // Uang dari sebuah sumber hanya boleh keluar dari vault yang benar-benar
     // menyimpannya. Cek agregat sumber saja tidak cukup: dua vault bisa berisi
     // sumber yang sama, dan tanpa cek pasangan ini pengeluaran dari satu vault
@@ -157,7 +173,17 @@ export async function addTransaction(
       input.vaultId ?? null,
       amount
     );
-    if (!check.ok) return check;
+    if (!check.ok) {
+      if (check.error === "transactions.sourceNotInVault") {
+        const vaultShortfall = await loadVaultShortfall(supabase, user.id, {
+          vaultId: input.vaultId ?? null,
+          fundingSourceId: input.fundingSourceId ?? null,
+          amount,
+        });
+        if (vaultShortfall) return { ok: false, error: check.error, vaultShortfall };
+      }
+      return check;
+    }
     base.funding_source_id = input.fundingSourceId ?? null;
 
     // Anggaran adalah batas keras: tolak sebelum insert kalau nominal ini akan
@@ -516,13 +542,18 @@ export async function deleteTransaction(
   // uang masuk (income / transfer masuk). Kumpulkan dulu semua baris yang
   // akan ikut terhapus (satu baris atau satu group split/transfer), lalu
   // tolak seluruhnya bila ada yang menempel pada vault terkunci.
-  let rows = [
-    { type: tx.type, vault_id: tx.vault_id, transfer_direction: tx.transfer_direction },
+  let rows: Array<{
+    id: number;
+    type: Transaction["type"];
+    vault_id: string | null;
+    transfer_direction: Transaction["transfer_direction"];
+  }> = [
+    { id: tx.id, type: tx.type, vault_id: tx.vault_id, transfer_direction: tx.transfer_direction },
   ];
   if (tx.group_id) {
     const { data: groupRows, error: groupError } = await supabase
       .from("transactions")
-      .select("type, vault_id, transfer_direction")
+      .select("id, type, vault_id, transfer_direction")
       .eq("user_id", user.id)
       .eq("group_id", tx.group_id);
     if (groupError || !groupRows) return { ok: false, error: "err.generic" };
@@ -542,6 +573,27 @@ export async function deleteTransaction(
       (lockedVaults ?? []).map((vault) => vault.id)
     );
     if (guard) return { ok: false, error: guard };
+  }
+
+  // Transfer keluar pinjaman antar vault adalah jaminan utang yang belum
+  // lunas: menghapusnya mengembalikan uang ke pemberi tanpa menyentuh
+  // `outstanding`, sehingga utang terlihat menyusut padahal uangnya tidak
+  // jadi berpindah. Tolak selama utangnya masih terbuka; setelah lunas
+  // baris boleh dihapus (FK-nya men-set null `transfer_out_id`).
+  const { data: linkedBorrows, error: linkedBorrowError } = await supabase
+    .from("vault_borrows")
+    .select("id, status")
+    .eq("user_id", user.id)
+    .in(
+      "transfer_out_id",
+      rows.map((row) => row.id)
+    );
+  if (linkedBorrowError) {
+    console.error("Supabase vault borrow link load failed during delete.", linkedBorrowError);
+    return { ok: false, error: "err.generic" };
+  }
+  if ((linkedBorrows ?? []).some((borrow) => borrow.status === "open")) {
+    return { ok: false, error: "err.vaultBorrowTransfer" };
   }
 
   if (tx.group_id) {
@@ -764,6 +816,27 @@ export async function editTransaction(
   if (error) {
     console.error("Supabase transaction edit failed.", { code: error.code, message: error.message });
     if (error.message.startsWith("err.") || error.message.startsWith("transactions.")) {
+      // Penolakan guard dana vault pada expense dilengkapi angka kekurangannya
+      // (dinilai tanpa baris lama, sama seperti guard RPC) supaya bisa
+      // ditutup lewat pinjaman antar vault. Edit pemasukan tidak ikut: uang
+      // yang kurang bukan masalah yang bisa diselesaikan dengan meminjam.
+      if (
+        existing.type === "expense" &&
+        (error.message === "transactions.insufficient" ||
+          error.message === "transactions.sourceNotInVault")
+      ) {
+        const vaultShortfall = await loadVaultShortfall(supabase, user.id, {
+          vaultId: input.vaultId,
+          fundingSourceId: input.fundingSourceId,
+          amount,
+          excludeTransactionId: input.id,
+        });
+        return {
+          ok: false,
+          error: error.message,
+          ...(vaultShortfall ? { vaultShortfall } : {}),
+        };
+      }
       return { ok: false, error: error.message };
     }
     return { ok: false, error: "err.generic" };

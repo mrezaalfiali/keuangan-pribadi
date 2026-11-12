@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/src/lib/utils";
 
@@ -31,8 +32,9 @@ export function Dialog({
   }, [open]);
 
   if (!rendered) return null;
+  if (typeof document === "undefined") return null;
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-end justify-center sm:items-center"
       aria-modal="true"
@@ -47,7 +49,7 @@ export function Dialog({
       />
       <div
         className={cn(
-          "relative z-10 w-full max-w-lg rounded-t-3xl border border-line bg-surface p-6 shadow-2xl transition-all duration-200 sm:rounded-3xl rise-in",
+          "relative z-10 max-h-[85dvh] w-full max-w-lg overflow-y-auto overscroll-contain rounded-t-3xl border border-line bg-surface p-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] shadow-2xl transition-all duration-200 rise-in sm:max-h-[calc(100dvh_-_2.5rem)] sm:rounded-3xl",
           open ? "translate-y-0 opacity-100" : "translate-y-6 opacity-0",
           className
         )}
@@ -68,6 +70,7 @@ export function Dialog({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

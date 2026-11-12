@@ -126,8 +126,43 @@ export async function exportJson(): Promise<ExportPayload> {
           : null,
     }));
 
+    // Sama seperti budget_borrows: tabel migrasi manual, jadi gagal membaca
+    // (belum ada) bukan alasan membatalkan seluruh backup.
+    let rawVaultBorrows: Record<string, unknown>[] = [];
+    try {
+      rawVaultBorrows = await readAllRows<Record<string, unknown>>(
+        "vault_borrows",
+        (from, to) =>
+          supabase
+            .from("vault_borrows")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("id")
+            .range(from, to)
+      );
+    } catch (vaultBorrowError) {
+      console.warn("Could not read vault_borrows for backup export (table may not exist yet).", vaultBorrowError);
+      rawVaultBorrows = [];
+    }
+
+    const vaultBorrows = rawVaultBorrows.map((row) => ({
+      id: row.id,
+      from_vault_id: row.from_vault_id,
+      to_vault_id: row.to_vault_id,
+      funding_source_id: row.funding_source_id,
+      amount: row.amount,
+      outstanding: row.outstanding,
+      status: row.status,
+      created_at: row.created_at,
+      transfer_backup_key:
+        row.transfer_out_id !== null && row.transfer_out_id !== undefined
+          ? txBackupKeyMap.get(row.transfer_out_id as number | string) ?? null
+          : null,
+    }));
+
     const totalRows = transactions.length + vaults.length + categories.length + budgets.length +
-      allocationRules.length + allocationSlots.length + recurringTransactions.length + budgetBorrows.length;
+      allocationRules.length + allocationSlots.length + recurringTransactions.length + budgetBorrows.length +
+      vaultBorrows.length;
     if (totalRows > MAX_BACKUP_ROWS) throw new Error("backup.export.tooManyRows");
 
     const data = JSON.stringify(
@@ -142,6 +177,7 @@ export async function exportJson(): Promise<ExportPayload> {
         transactions: backupTransactions,
         budgets,
         budget_borrows: budgetBorrows,
+        vault_borrows: vaultBorrows,
         allocation_rules: allocationRules,
         allocation_slots: allocationSlots,
         recurring_transactions: recurringTransactions,
