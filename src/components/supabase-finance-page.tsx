@@ -3572,7 +3572,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                         <EllipsisVertical size={17} />
                       </button>
                       {expenseCatMenuId === category.id && (
-                        <div className="absolute right-0 top-full z-30 mt-1 rounded-xl border border-line bg-surface p-1 shadow-lg">
+                        <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
                           <button
                             type="button"
                             onClick={() => {
@@ -3581,11 +3581,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               setEditingExpenseCatName(categoryLabel(category) ?? "");
                               setExpenseCatEditError("");
                             }}
-                            aria-label={txText("editCategory")}
-                            title={txText("editCategory")}
-                            className="flex w-full items-center justify-center rounded-lg p-2 text-ink hover:bg-surface2"
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
                           >
                             <Pencil size={15} />
+                            {txText("editCategory")}
                           </button>
                           <button
                             type="button"
@@ -3593,11 +3592,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               setExpenseCatMenuId("");
                               void hideExpenseCategoryFlow(category);
                             }}
-                            aria-label={txText("hideCategory")}
-                            title={txText("hideCategory")}
-                            className="flex w-full items-center justify-center rounded-lg p-2 text-ink hover:bg-surface2"
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
                           >
                             <EyeOff size={15} />
+                            {txText("hideCategory")}
                           </button>
                         </div>
                       )}
