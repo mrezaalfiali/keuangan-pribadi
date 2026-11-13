@@ -68,6 +68,7 @@ import {
 } from "@/src/lib/budget";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { resolveLabel, sortByLabel } from "@/src/lib/labels";
+import { applySourceOverrides, type SourceOverride } from "@/src/lib/sources";
 import { vaultBalanceDelta } from "@/src/lib/vault-ledger";
 import { getLevelInfo, LEVELS } from "@/src/lib/levels";
 import { activeStreak, computeAchievementProgress, countAchievementTransactions, nextStreakReward, savingsRate } from "@/src/lib/gamification";
@@ -235,7 +236,7 @@ export function SupabaseToolsPage({ section }: Props) {
       setUserId(user.id);
       setEmail(user.email ?? "");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult, vaultBorrowResult] = await Promise.all([
+      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult, vaultBorrowResult, overrideResult] = await Promise.all([
         supabase.from("vaults").select("*").eq("user_id", user.id).order("priority"),
         supabase.from("transactions").select("*").eq("user_id", user.id).order("date", { ascending: false }),
         supabase.from("budgets").select("*").eq("user_id", user.id).order("starts_on", { ascending: false }),
@@ -252,6 +253,9 @@ export function SupabaseToolsPage({ section }: Props) {
         // Migrasi 0030 juga manual; tanpa tabel utang, kartu vault tetap tampil
         // tanpa catatan utang -- kosong bukan kegagalan.
         supabase.from("vault_borrows").select("*").eq("user_id", user.id),
+        // Rename kategori per akun: label scope anggaran harus memakai nama
+        // hasil rename, bukan nama asli katalog bersama.
+        supabase.from("category_overrides").select("category_id, custom_name, hidden").eq("user_id", user.id),
       ]);
       const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
@@ -259,7 +263,6 @@ export function SupabaseToolsPage({ section }: Props) {
       setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setTransactions((txResult.data ?? []) as Transaction[]);
       setBudgets((budgetResult.data ?? []) as Budget[]);
-      setCategories(sortByLabel(categories, categoryName, locale));
       setRules((ruleResult.data ?? []) as RuleWithSlots[]);
       setProfile(profileResult.data as Profile | null);
       setGamification(gameResult.data as GamificationState | null);
@@ -279,6 +282,13 @@ export function SupabaseToolsPage({ section }: Props) {
         logSupabaseError("tools.loadVaultBorrows", vaultBorrowResult.error);
       }
       setVaultBorrows((vaultBorrowResult.data ?? []) as VaultBorrowRow[]);
+      if (overrideResult.error) {
+        // Migrasi 0022 dijalankan manual; label anggaran memakai nama asli
+        // sampai tabel override tersedia.
+        logSupabaseError("tools.loadCategoryOverrides", overrideResult.error);
+      }
+      const overrides = (overrideResult.data ?? []) as SourceOverride[];
+      setCategories(sortByLabel(applySourceOverrides(categories, overrides), categoryName, locale));
     } catch (loadError) {
       logSupabaseError("tools.load", loadError);
       setError(settings("connectionError"));

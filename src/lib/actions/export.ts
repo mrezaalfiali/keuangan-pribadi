@@ -160,9 +160,37 @@ export async function exportJson(): Promise<ExportPayload> {
           : null,
     }));
 
+    // Catatan rename/sembunyi kategori per akun (migrasi 0022) ikut diekspor:
+    // tanpa baris ini, restore ke akun baru mengembalikan nama kategori bawaan
+    // ke nama aslinya. Pola toleran yang sama seperti tabel migrasi manual.
+    let rawCategoryOverrides: Record<string, unknown>[] = [];
+    try {
+      rawCategoryOverrides = await readAllRows<Record<string, unknown>>(
+        "category_overrides",
+        (from, to) =>
+          supabase
+            .from("category_overrides")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("category_id")
+            .range(from, to)
+      );
+    } catch (overrideError) {
+      console.warn("Could not read category_overrides for backup export (table may not exist yet).", overrideError);
+      rawCategoryOverrides = [];
+    }
+
+    const categoryOverrides = rawCategoryOverrides.map((row) => ({
+      category_id: row.category_id,
+      custom_name: row.custom_name,
+      hidden: row.hidden,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+
     const totalRows = transactions.length + vaults.length + categories.length + budgets.length +
       allocationRules.length + allocationSlots.length + recurringTransactions.length + budgetBorrows.length +
-      vaultBorrows.length;
+      vaultBorrows.length + categoryOverrides.length;
     if (totalRows > MAX_BACKUP_ROWS) throw new Error("backup.export.tooManyRows");
 
     const data = JSON.stringify(
@@ -178,6 +206,7 @@ export async function exportJson(): Promise<ExportPayload> {
         budgets,
         budget_borrows: budgetBorrows,
         vault_borrows: vaultBorrows,
+        category_overrides: categoryOverrides,
         allocation_rules: allocationRules,
         allocation_slots: allocationSlots,
         recurring_transactions: recurringTransactions,

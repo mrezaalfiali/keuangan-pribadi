@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from "react";
 import { useLocale, useTranslations } from "next-intl";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Pause, Pencil, Play, Plus, SkipForward, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDollarSign, Copy, Download, EllipsisVertical, Eye, EyeOff, Pause, Pencil, Play, Plus, SkipForward, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { Card, CardContent } from "@/src/components/ui/card";
 import { CashflowChart } from "@/src/components/cashflow-chart";
 import { Button } from "@/src/components/ui/button";
@@ -15,7 +15,7 @@ import { addTransaction, deleteTransaction, editTransaction } from "@/src/lib/ac
 import { borrowBudget } from "@/src/lib/actions/budgets";
 import { borrowVault } from "@/src/lib/actions/vault-borrows";
 import { eligibleVaultLenders, type VaultBorrowLenderCandidate } from "@/src/lib/vault-borrow";
-import { createIncomeSource, deleteIncomeSource, updateIncomeSource } from "@/src/lib/actions/categories";
+import { createExpenseCategory, createIncomeSource, deleteIncomeSource, hideExpenseCategory, showCategory, updateExpenseCategory, updateIncomeSource } from "@/src/lib/actions/categories";
 import {
   applySourceOverrides,
   computeSourceVaultBalances,
@@ -287,6 +287,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [transactions, setTransactions] = useState<TxRow[]>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  /**
+   * Katalog kategori mentah (tanpa filter tersembunyi) untuk daftar kelola
+   * "Tersembunyi" dan untuk melengkapi dropdown saat mengedit data lama.
+   */
+  const [allCategories, setAllCategories] = useState<Category[]>([]);
   const [sourceOverrides, setSourceOverrides] = useState<SourceOverride[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTransaction[]>([]);
@@ -322,6 +327,20 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [editingSourceId, setEditingSourceId] = useState("");
   const [editingSourceName, setEditingSourceName] = useState("");
   const [sourceEditError, setSourceEditError] = useState("");
+  const [expenseCatName, setExpenseCatName] = useState("");
+  const [expenseCatFormError, setExpenseCatFormError] = useState("");
+  const [savingExpenseCat, setSavingExpenseCat] = useState(false);
+  const [editingExpenseCatId, setEditingExpenseCatId] = useState("");
+  const [editingExpenseCatName, setEditingExpenseCatName] = useState("");
+  const [expenseCatEditError, setExpenseCatEditError] = useState("");
+  const [expenseCatMenuId, setExpenseCatMenuId] = useState("");
+  const expenseCatMenuRef = useRef<HTMLDivElement>(null);
+  /** Dialog "Kelola kategori": daftar penuh pindah ke sini agar kartu ringkas. */
+  const [manageCatOpen, setManageCatOpen] = useState(false);
+  /** Bagian "Tersembunyi" di dalam dialog, default tertutup. */
+  const [hiddenCatsOpen, setHiddenCatsOpen] = useState(false);
+  /** Galat sembunyikan/tampilkan; tampil di dalam dialog, bukan banner halaman. */
+  const [manageCatError, setManageCatError] = useState("");
   const [filterType, setFilterType] = useState<"" | "income" | "expense" | "transfer">("");
   const [filterMonth, setFilterMonth] = useState("");
   const [filterFromDate, setFilterFromDate] = useState("");
@@ -435,6 +454,26 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   }, [sourceMenuId]);
 
   useEffect(() => {
+    if (expenseCatMenuId === "") return;
+
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !expenseCatMenuRef.current?.contains(event.target)) {
+        setExpenseCatMenuId("");
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpenseCatMenuId("");
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [expenseCatMenuId]);
+
+  useEffect(() => {
     if (!filtersMenuOpen) return;
 
     const closeOnOutsideClick = (event: PointerEvent) => {
@@ -542,6 +581,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setSourceOverrides(overrides);
       setCategories(sortByLabel(applySourceOverrides(categories, overrides), categoryName, locale));
+      setAllCategories(sortByLabel(categories, categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setBudgetBorrows((borrowResult.data ?? []) as BudgetBorrow[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
@@ -600,6 +640,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
 
   const incomeCategories = categories.filter((category) => category.type === "income");
   const expenseCategories = categories.filter((category) => category.type === "expense");
+  // Daftar kelola "Tersembunyi" diambil dari katalog mentah + flag override;
+  // `categories` sudah membuang baris tersembunyi sehingga tidak bisa dipakai.
+  const hiddenExpenseCategories = allCategories.filter(
+    (category) =>
+      category.type === "expense" && sourceOverridesById.get(category.id)?.hidden === true
+  );
   const sourceSummaries = summarizeSources(transactions, incomeCategories);
   // Saldo per pasangan (sumber, vault), bukan per sumber: sebuah sumber hanya
   // boleh membiayai pengeluaran dari vault tempat uangnya benar-benar tersimpan.
@@ -1036,6 +1082,110 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     if (code === "transactions.sourceFallbackProtected") return txText("sourceFallbackProtected");
     if (code === "transactions.sourceNotFound") return txText("sourceNotFound");
     return settings("deleteError");
+  }
+
+  function categoryFormErrorMessage(code: string | undefined, name: string = expenseCatName) {
+    if (code === "transactions.categoryExists") return txText("categoryExists");
+    if (code === "transactions.categoryNameTakenSystem") {
+      return txText("categoryNameTakenSystem", { name: name.trim() });
+    }
+    if (code === "transactions.categoryName") return txText("categoryNameInvalid");
+    if (code === "transactions.categoryNotFound") return txText("categoryNotFound");
+    if (code === "transactions.categoryUsedByRecurring") return txText("categoryUsedByRecurring");
+    if (code === "transactions.categoryUsedByBudget") return txText("categoryUsedByBudget");
+    if (code === "err.auth") return txText("authError");
+    return settings("saveError");
+  }
+
+  function categoryActionErrorMessage(code: string | undefined) {
+    if (code === "transactions.categoryNotFound") return txText("categoryNotFound");
+    if (code === "transactions.categoryUsedByRecurring") return txText("categoryUsedByRecurring");
+    if (code === "transactions.categoryUsedByBudget") return txText("categoryUsedByBudget");
+    if (code === "err.auth") return txText("authError");
+    return settings("deleteError");
+  }
+
+  async function submitExpenseCategory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!expenseCatName.trim()) return;
+    setSavingExpenseCat(true);
+    setExpenseCatFormError("");
+    try {
+      const result = await createExpenseCategory(locale, { name: expenseCatName });
+      if (!result.ok) {
+        setExpenseCatFormError(categoryFormErrorMessage(result.error));
+        return;
+      }
+      setExpenseCatName("");
+      await load();
+    } catch (saveError) {
+      console.error("Supabase expense category insert failed.", saveError);
+      setExpenseCatFormError(settings("saveError"));
+    } finally {
+      setSavingExpenseCat(false);
+    }
+  }
+
+  async function saveExpenseCatEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = editingExpenseCatName.trim();
+    if (!editingExpenseCatId || !name) return;
+    setSavingExpenseCat(true);
+    setExpenseCatEditError("");
+    try {
+      const result = await updateExpenseCategory(locale, editingExpenseCatId, name);
+      if (!result.ok) {
+        setExpenseCatEditError(categoryFormErrorMessage(result.error, name));
+        return;
+      }
+      setEditingExpenseCatId("");
+      setEditingExpenseCatName("");
+      await load();
+      setNotice(txText("categoryUpdated"));
+    } catch (saveError) {
+      console.error("Supabase expense category rename failed.", saveError);
+      setExpenseCatEditError(settings("saveError"));
+    } finally {
+      setSavingExpenseCat(false);
+    }
+  }
+
+  async function hideExpenseCategoryFlow(category: Category) {
+    const label = categoryLabel(category) ?? category.slug;
+    if (!window.confirm(txText("hideCategoryConfirm", { name: label }))) return;
+    setManageCatError("");
+    try {
+      const result = await hideExpenseCategory(locale, category.id);
+      if (!result.ok) {
+        setManageCatError(categoryActionErrorMessage(result.error));
+        return;
+      }
+      if (editingExpenseCatId === category.id) {
+        setEditingExpenseCatId("");
+        setEditingExpenseCatName("");
+        setExpenseCatEditError("");
+      }
+      if (filterCategory === category.id) setFilterCategory("");
+      await load();
+    } catch (hideError) {
+      console.error("Supabase expense category hide failed.", hideError);
+      setManageCatError(settings("deleteError"));
+    }
+  }
+
+  async function showExpenseCategoryFlow(category: Category) {
+    setManageCatError("");
+    try {
+      const result = await showCategory(locale, category.id);
+      if (!result.ok) {
+        setManageCatError(categoryActionErrorMessage(result.error));
+        return;
+      }
+      await load();
+    } catch (showError) {
+      console.error("Supabase category show failed.", showError);
+      setManageCatError(settings("saveError"));
+    }
   }
 
   async function submitSource(event: FormEvent<HTMLFormElement>) {
@@ -1594,6 +1744,14 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   }
 
   function transactionEditForm(transaction: TxRow) {
+    const baseCategories = transaction.type === "income" ? incomeCategories : expenseCategories;
+    // Kategori tersembunyi tidak ada di daftar pilihan, tetapi transaksi lama
+    // masih menunjuknya -- ikut diselipkan supaya pilihan lama tidak hilang.
+    const currentCategory = transaction.category;
+    const editCategories =
+      currentCategory && !baseCategories.some((category) => category.id === currentCategory.id)
+        ? [...baseCategories, currentCategory]
+        : baseCategories;
     return (
       <form onSubmit={saveTransactionEdit} className="mb-2 grid gap-4 rounded-2xl border border-line bg-bg1/60 p-4 sm:grid-cols-2">
         <h3 className="font-display text-sm font-semibold text-ink sm:col-span-2">{txText("editTitle")}</h3>
@@ -1606,7 +1764,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         <Field label={txText("category")}>
           <select name="categoryId" defaultValue={transaction.category_id ?? ""} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
             <option value="">{common("none")}</option>
-            {(transaction.type === "income" ? incomeCategories : expenseCategories).map((category) => (
+            {editCategories.map((category) => (
               <option key={category.id} value={category.id}>{categoryLabel(category) ?? humanizeSlug(category.slug)}</option>
             ))}
           </select>
@@ -2364,6 +2522,59 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 ))}
               </ul>
             )}
+          </CardContent>
+        </Card>
+      )}
+      {section === "dashboard" && (
+        <Card>
+          <CardContent className="p-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-display text-lg font-semibold text-ink">{txText("categoriesTitle")}</h2>
+              {expenseCategories.length > 0 && (
+                <p className="text-xs text-faint">
+                  {txText("categoryCount", { count: expenseCategories.length })}
+                </p>
+              )}
+            </div>
+            <form
+              onSubmit={submitExpenseCategory}
+              className="mt-4 flex flex-col gap-2 rounded-2xl border border-line bg-surface2/40 p-3 sm:flex-row sm:items-end sm:gap-3"
+            >
+              <div className="min-w-0 flex-1">
+                <Field label={txText("categoryName")} error={expenseCatFormError || null}>
+                  <Input
+                    name="expenseCategoryName"
+                    value={expenseCatName}
+                    maxLength={80}
+                    onChange={(event) => {
+                      setExpenseCatName(event.target.value);
+                      if (expenseCatFormError) setExpenseCatFormError("");
+                    }}
+                    placeholder={txText("categoryHint")}
+                  />
+                </Field>
+              </div>
+              <Button
+                type="submit"
+                disabled={savingExpenseCat || !expenseCatName.trim()}
+                className="w-full shrink-0 sm:w-auto"
+              >
+                <Plus size={16} />
+                {savingExpenseCat ? common("loading") : txText("addCategory")}
+              </Button>
+            </form>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setManageCatError("");
+                setManageCatOpen(true);
+              }}
+              className="mt-4 w-full sm:w-auto"
+            >
+              <SlidersHorizontal size={16} />
+              {txText("manageCategories")}
+            </Button>
           </CardContent>
         </Card>
       )}
@@ -3270,6 +3481,171 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             </Button>
           </div>
         </div>
+      </Dialog>
+      <Dialog
+        open={manageCatOpen}
+        onClose={() => {
+          setManageCatOpen(false);
+          setExpenseCatMenuId("");
+          setManageCatError("");
+        }}
+        title={txText("categoriesTitle")}
+        description={
+          expenseCategories.length > 0
+            ? txText("categoryCount", { count: expenseCategories.length })
+            : undefined
+        }
+      >
+        {manageCatError && (
+          <p
+            role="alert"
+            className="mb-3 rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger"
+          >
+            {manageCatError}
+          </p>
+        )}
+        {loading ? (
+          <p className="py-8 text-center text-sm text-muted">{common("loading")}</p>
+        ) : expenseCategories.length === 0 ? (
+          <p className="py-8 text-center text-sm text-muted">{txText("categoriesEmpty")}</p>
+        ) : (
+          <ul className="grid gap-3 sm:grid-cols-2">
+            {expenseCategories.map((category) => (
+              <li key={category.id} className="rounded-2xl border border-line bg-bg1 p-4">
+                {editingExpenseCatId === category.id ? (
+                  <form onSubmit={saveExpenseCatEdit} className="grid gap-2">
+                    <div className="flex items-center gap-1">
+                      <div className="min-w-0 flex-1">
+                        <Input
+                          value={editingExpenseCatName}
+                          maxLength={80}
+                          autoFocus
+                          aria-label={txText("categoryName")}
+                          onChange={(event) => {
+                            setEditingExpenseCatName(event.target.value);
+                            if (expenseCatEditError) setExpenseCatEditError("");
+                          }}
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={savingExpenseCat || !editingExpenseCatName.trim()}
+                        aria-label={common("save")}
+                        className="shrink-0 rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink disabled:opacity-50"
+                      >
+                        <Check size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={savingExpenseCat}
+                        onClick={() => {
+                          setEditingExpenseCatId("");
+                          setEditingExpenseCatName("");
+                          setExpenseCatEditError("");
+                        }}
+                        aria-label={common("cancel")}
+                        className="shrink-0 rounded-lg p-2 text-faint hover:bg-surface2 hover:text-ink disabled:opacity-50"
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                    {expenseCatEditError && <p className="text-xs text-danger">{expenseCatEditError}</p>}
+                  </form>
+                ) : (
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-medium text-ink">
+                      {categoryLabel(category)}
+                    </p>
+                    <div
+                      ref={expenseCatMenuId === category.id ? expenseCatMenuRef : null}
+                      className="relative shrink-0"
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpenseCatMenuId(expenseCatMenuId === category.id ? "" : category.id)
+                        }
+                        aria-label={txText("categoryActions")}
+                        aria-expanded={expenseCatMenuId === category.id}
+                        className="rounded-lg p-1.5 text-faint hover:bg-surface2 hover:text-ink"
+                      >
+                        <EllipsisVertical size={17} />
+                      </button>
+                      {expenseCatMenuId === category.id && (
+                        <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setExpenseCatMenuId("");
+                              setEditingExpenseCatId(category.id);
+                              setEditingExpenseCatName(categoryLabel(category) ?? "");
+                              setExpenseCatEditError("");
+                            }}
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
+                          >
+                            <Pencil size={15} />
+                            {txText("editCategory")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setExpenseCatMenuId("");
+                              void hideExpenseCategoryFlow(category);
+                            }}
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
+                          >
+                            <EyeOff size={15} />
+                            {txText("hideCategory")}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {hiddenExpenseCategories.length > 0 && (
+          <div className="mt-4">
+            <button
+              type="button"
+              aria-expanded={hiddenCatsOpen}
+              onClick={() => setHiddenCatsOpen((open) => !open)}
+              className="flex w-full items-center justify-between gap-3 rounded-xl border border-line bg-surface2/40 px-3 py-2.5 text-left text-sm font-medium text-ink"
+            >
+              <span>
+                {txText("hiddenCategories")} ({hiddenExpenseCategories.length})
+              </span>
+              <ChevronDown
+                size={16}
+                aria-hidden="true"
+                className={`shrink-0 text-muted transition-transform ${hiddenCatsOpen ? "rotate-180" : ""}`}
+              />
+            </button>
+            {hiddenCatsOpen && (
+              <ul className="mt-2 flex flex-wrap gap-2">
+                {hiddenExpenseCategories.map((category) => (
+                  <li
+                    key={category.id}
+                    className="flex items-center gap-2 rounded-xl border border-line bg-bg1 px-3 py-1.5 text-sm"
+                  >
+                    <span className="text-muted">{categoryLabel(category)}</span>
+                    <button
+                      type="button"
+                      disabled={savingExpenseCat}
+                      onClick={() => void showExpenseCategoryFlow(category)}
+                      className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs font-medium text-ink hover:bg-surface2 disabled:opacity-50"
+                    >
+                      <Eye size={13} />
+                      {txText("showCategory")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </Dialog>
     </div>
   );
