@@ -3572,7 +3572,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                         <EllipsisVertical size={17} />
                       </button>
                       {expenseCatMenuId === category.id && (
-                        <div className="absolute right-0 top-full z-30 mt-1 min-w-36 rounded-xl border border-line bg-surface p-1 shadow-lg">
+                        <div className="absolute right-0 top-full z-30 mt-1 rounded-xl border border-line bg-surface p-1 shadow-lg">
                           <button
                             type="button"
                             onClick={() => {
@@ -3581,10 +3581,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               setEditingExpenseCatName(categoryLabel(category) ?? "");
                               setExpenseCatEditError("");
                             }}
-                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
+                            aria-label={txText("editCategory")}
+                            title={txText("editCategory")}
+                            className="flex w-full items-center justify-center rounded-lg p-2 text-ink hover:bg-surface2"
                           >
                             <Pencil size={15} />
-                            {txText("editCategory")}
                           </button>
                           <button
                             type="button"
@@ -3592,10 +3593,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               setExpenseCatMenuId("");
                               void hideExpenseCategoryFlow(category);
                             }}
-                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2"
+                            aria-label={txText("hideCategory")}
+                            title={txText("hideCategory")}
+                            className="flex w-full items-center justify-center rounded-lg p-2 text-ink hover:bg-surface2"
                           >
                             <EyeOff size={15} />
-                            {txText("hideCategory")}
                           </button>
                         </div>
                       )}
@@ -3635,10 +3637,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                       type="button"
                       disabled={savingExpenseCat}
                       onClick={() => void showExpenseCategoryFlow(category)}
-                      className="flex items-center gap-1 rounded-lg px-1.5 py-1 text-xs font-medium text-ink hover:bg-surface2 disabled:opacity-50"
+                      aria-label={txText("showCategory")}
+                      title={txText("showCategory")}
+                      className="rounded-lg p-1 text-faint hover:bg-surface2 hover:text-ink disabled:opacity-50"
                     >
-                      <Eye size={13} />
-                      {txText("showCategory")}
+                      <Eye size={14} />
                     </button>
                   </li>
                 ))}
