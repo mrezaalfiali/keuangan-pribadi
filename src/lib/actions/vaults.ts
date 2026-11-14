@@ -154,21 +154,25 @@ export async function deleteVault(
   // pintu belakang. Buka kunci dulu sebelum menghapus.
   if (vault.is_locked) return { ok: false, error: "transactions.lockedError" };
 
-  // Utang pinjaman antar vault ikut terhapus oleh FK cascade (baik sebagai
-  // pemberi maupun peminjam), jadi bayar dulu sebelum menghapus -- kalau tidak,
-  // jejak siapa harus mengembalikan uang hilang bersama vaultnya.
-  const { data: openBorrows, error: openBorrowError } = await supabase
+  // Baris pinjaman antar vault ikut terhapus oleh FK cascade (baik sebagai
+  // pemberi maupun peminjam), jadi catatannya harus hilang dulu sebelum
+  // vault-nya dihapus -- kalau tidak, jejak siapa harus mengembalikan uang
+  // ikut raib tanpa jejak, dan guard transfer pinjaman kehilangan pijakannya
+  // (transfer jaminan jadi bisa dihapus karena barisnya sudah tidak ada).
+  // Berlaku untuk status apa pun, sama seperti guard transfer: catatan
+  // pinjaman tidak punya tombol hapus, jadi escape hatch-nya reset data
+  // atau SQL manual.
+  const { data: linkedBorrows, error: linkedBorrowError } = await supabase
     .from("vault_borrows")
     .select("id")
     .eq("user_id", user.id)
-    .eq("status", "open")
     .or(`from_vault_id.eq.${vaultId},to_vault_id.eq.${vaultId}`)
     .limit(1);
-  if (openBorrowError) {
-    console.error("Supabase vault borrow load failed during vault delete.", openBorrowError);
+  if (linkedBorrowError) {
+    console.error("Supabase vault borrow load failed during vault delete.", linkedBorrowError);
     return { ok: false, error: "err.generic" };
   }
-  if (openBorrows && openBorrows.length > 0) {
+  if (linkedBorrows && linkedBorrows.length > 0) {
     return { ok: false, error: "err.vaultBorrowOpen" };
   }
 

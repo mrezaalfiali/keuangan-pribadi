@@ -532,7 +532,7 @@ export async function deleteTransaction(
 
   const { data: tx, error: txError } = await supabase
     .from("transactions")
-    .select("id, user_id, group_id, type, vault_id, transfer_direction")
+    .select("id, user_id, group_id, type, amount, vault_id, transfer_direction")
     .eq("id", txId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -545,15 +545,22 @@ export async function deleteTransaction(
   let rows: Array<{
     id: number;
     type: Transaction["type"];
+    amount: number;
     vault_id: string | null;
     transfer_direction: Transaction["transfer_direction"];
   }> = [
-    { id: tx.id, type: tx.type, vault_id: tx.vault_id, transfer_direction: tx.transfer_direction },
+    {
+      id: tx.id,
+      type: tx.type,
+      amount: tx.amount,
+      vault_id: tx.vault_id,
+      transfer_direction: tx.transfer_direction,
+    },
   ];
   if (tx.group_id) {
     const { data: groupRows, error: groupError } = await supabase
       .from("transactions")
-      .select("id, type, vault_id, transfer_direction")
+      .select("id, type, amount, vault_id, transfer_direction")
       .eq("user_id", user.id)
       .eq("group_id", tx.group_id);
     if (groupError || !groupRows) return { ok: false, error: "err.generic" };
@@ -575,26 +582,105 @@ export async function deleteTransaction(
     if (guard) return { ok: false, error: guard };
   }
 
-  // Transfer keluar pinjaman antar vault adalah jaminan utang yang belum
-  // lunas: menghapusnya mengembalikan uang ke pemberi tanpa menyentuh
-  // `outstanding`, sehingga utang terlihat menyusut padahal uangnya tidak
-  // jadi berpindah. Tolak selama utangnya masih terbuka; setelah lunas
-  // baris boleh dihapus (FK-nya men-set null `transfer_out_id`).
+  // Transfer keluar pinjaman antar vault adalah jejak penyaluran uang yang
+  // menopang catatan pinjaman: menghapusnya mengembalikan uang ke pemberi
+  // tanpa menyentuh `outstanding`, dan kalau pembayaran yang tersisa ikut
+  // di-undo (riwayat bayar dihapus), utang terbuka kembali tanpa ada uang
+  // yang pernah berpindah -- saldo kedua vault jadi salah tanpa jejak.
+  // Tolak selama baris pinjaman masih menunjuknya, apa pun statusnya;
+  // catatan pinjaman tidak punya tombol hapus, jadi escape hatch-nya
+  // reset data atau SQL manual.
   const { data: linkedBorrows, error: linkedBorrowError } = await supabase
     .from("vault_borrows")
-    .select("id, status")
+    .select("id")
     .eq("user_id", user.id)
     .in(
       "transfer_out_id",
       rows.map((row) => row.id)
-    );
+    )
+    .limit(1);
   if (linkedBorrowError) {
     console.error("Supabase vault borrow link load failed during delete.", linkedBorrowError);
     return { ok: false, error: "err.generic" };
   }
-  if ((linkedBorrows ?? []).some((borrow) => borrow.status === "open")) {
+  if ((linkedBorrows ?? []).length > 0) {
     return { ok: false, error: "err.vaultBorrowTransfer" };
   }
+
+  // Transfer pembayaran utang tercatat di `repayment_group_ids` baris
+  // utang: menghapusnya berarti membatalkan pembayaran, jadi `outstanding`
+  // harus ikut pulih. Restore dilakukan lebih dulu dengan syarat nilai
+  // barisnya masih sama seperti yang terbaca (anti-lomba); kalau gagal,
+  // transaksi tidak jadi dihapus supaya utang dan ledger tidak pernah
+  // berbeda. Sebaliknya, kalau penghapusan transaksi gagal setelah restore,
+  // nilainya dikembalikan (kompensasi best-effort).
+  let repaymentRestore: {
+    borrowId: string;
+    outstanding: number;
+    status: string;
+    repaymentGroupIds: string[];
+  } | null = null;
+  if (tx.group_id) {
+    const { data: repaymentBorrow, error: repaymentError } = await supabase
+      .from("vault_borrows")
+      .select("id, outstanding, status, repayment_group_ids")
+      .eq("user_id", user.id)
+      .contains("repayment_group_ids", [tx.group_id])
+      .limit(1)
+      .maybeSingle();
+    if (repaymentError) {
+      console.error("Supabase vault borrow repayment link load failed during delete.", repaymentError);
+      return { ok: false, error: "err.generic" };
+    }
+    if (repaymentBorrow) {
+      // Semua baris dalam satu group transfer memakai nominal yang sama.
+      const pay = rows[0].amount;
+      const prevGroupIds: string[] = repaymentBorrow.repayment_group_ids ?? [];
+      const { data: restored, error: restoreError } = await supabase
+        .from("vault_borrows")
+        .update({
+          outstanding: repaymentBorrow.outstanding + pay,
+          status: "open",
+          repayment_group_ids: prevGroupIds.filter((id) => id !== tx.group_id),
+        })
+        .eq("id", repaymentBorrow.id)
+        .eq("user_id", user.id)
+        .eq("outstanding", repaymentBorrow.outstanding)
+        .eq("status", repaymentBorrow.status)
+        .select("id");
+      if (restoreError) {
+        console.error("Supabase vault borrow repayment restore failed during delete.", restoreError);
+        return { ok: false, error: "err.generic" };
+      }
+      if (!restored?.length) {
+        // Nilai baris sudah berubah sejak dibaca -- kemungkinan dibayar
+        // dari tab lain. Batalkan sebelum ada yang terhapus.
+        return { ok: false, error: "err.generic" };
+      }
+      repaymentRestore = {
+        borrowId: repaymentBorrow.id,
+        outstanding: repaymentBorrow.outstanding,
+        status: repaymentBorrow.status,
+        repaymentGroupIds: prevGroupIds,
+      };
+    }
+  }
+
+  const revertRepaymentRestore = async (): Promise<void> => {
+    if (!repaymentRestore) return;
+    const { error } = await supabase
+      .from("vault_borrows")
+      .update({
+        outstanding: repaymentRestore.outstanding,
+        status: repaymentRestore.status,
+        repayment_group_ids: repaymentRestore.repaymentGroupIds,
+      })
+      .eq("id", repaymentRestore.borrowId)
+      .eq("user_id", user.id);
+    if (error) {
+      console.error("Supabase vault borrow repayment revert failed during delete.", error);
+    }
+  };
 
   if (tx.group_id) {
     const { error } = await supabase
@@ -602,14 +688,20 @@ export async function deleteTransaction(
       .delete()
       .eq("user_id", user.id)
       .eq("group_id", tx.group_id);
-    if (error) return { ok: false, error: "err.generic" };
+    if (error) {
+      await revertRepaymentRestore();
+      return { ok: false, error: "err.generic" };
+    }
   } else {
     const { error } = await supabase
       .from("transactions")
       .delete()
       .eq("id", txId)
       .eq("user_id", user.id);
-    if (error) return { ok: false, error: "err.generic" };
+    if (error) {
+      await revertRepaymentRestore();
+      return { ok: false, error: "err.generic" };
+    }
   }
 
   revalidatePath(`/${locale}/dashboard`);

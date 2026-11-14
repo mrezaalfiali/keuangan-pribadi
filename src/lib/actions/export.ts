@@ -158,6 +158,11 @@ export async function exportJson(): Promise<ExportPayload> {
         row.transfer_out_id !== null && row.transfer_out_id !== undefined
           ? txBackupKeyMap.get(row.transfer_out_id as number | string) ?? null
           : null,
+      // Jejak group transfer pembayaran (0032); group_id transaksi ikut
+      // terexport apa adanya, jadi tautan ini utuh setelah restore.
+      repayment_group_ids: Array.isArray(row.repayment_group_ids)
+        ? row.repayment_group_ids
+        : [],
     }));
 
     // Catatan rename/sembunyi kategori per akun (migrasi 0022) ikut diekspor:

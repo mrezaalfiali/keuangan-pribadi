@@ -61,7 +61,9 @@ async function awardRewards(
  * group, memakai sumber dana expense yang sama, jadi kolam kedua vault ikut
  * berpindah dan kedua guard -- saldo vault maupun kolam sumber -- terpenuhi
  * setelahnya). Utangnya dicatat di `vault_borrows` dan dilunasi manual lewat
- * `repayVaultBorrow`; menghapus transaksi yang memicunya TIDAK menghapus utang.
+ * `repayVaultBorrow`; menghapus transaksi yang memicunya TIDAK menghapus utang,
+ * tetapi menghapus transfer repayment justru mengembalikan sisa utang
+ * (`repayment_group_ids` menautkan tiap pembayaran ke baris utangnya).
  *
  * Semua syarat divalidasi ulang di server: pemberi harus tidak terkunci dan
  * `min(saldo, kolam)`-nya sanggup menutup nominal yang dipinta. UI hanya
@@ -236,6 +238,11 @@ export async function borrowVault(
  * uang yang dikembalikan adalah uang, bukan milik satu sumber tertentu, jadi
  * sumber transfernya dipilih otomatis oleh `pickRepaySource`.
  *
+ * Group transfer pembayaran dicatat di `repayment_group_ids` baris utang
+ * dalam update yang sama: menghapus riwayat pembayaran dari halaman
+ * transaksi mengembalikan `outstanding` (undo), bukan membiarkan utang
+ * tercatat menyusut tanpa uang yang benar-benar berpindah.
+ *
  * Pembaruan baris utang dilakukan lebih dulu dengan syarat nilainya masih
  * sama seperti yang terbaca (anti-lomba klik); kalau berubah di tengah jalan,
  * aksi batal sebelum transfer tercatat. Kegagalan transfer membatalkan
@@ -259,7 +266,9 @@ export async function repayVaultBorrow(
 
   const { data: borrow, error: borrowError } = await supabase
     .from("vault_borrows")
-    .select("id, from_vault_id, to_vault_id, funding_source_id, amount, outstanding, status")
+    .select(
+      "id, from_vault_id, to_vault_id, funding_source_id, amount, outstanding, status, repayment_group_ids"
+    )
     .eq("id", borrowId)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -307,12 +316,14 @@ export async function repayVaultBorrow(
   });
   if (!sourceId) return { ok: false, error: "transactions.noSource" };
 
+  const groupId = crypto.randomUUID();
   const newOutstanding = borrow.outstanding - pay;
   const { data: updated, error: updateError } = await supabase
     .from("vault_borrows")
     .update({
       outstanding: newOutstanding,
       status: newOutstanding === 0 ? "repaid" : "open",
+      repayment_group_ids: [...(borrow.repayment_group_ids ?? []), groupId],
     })
     .eq("id", borrow.id)
     .eq("user_id", user.id)
@@ -336,7 +347,6 @@ export async function repayVaultBorrow(
         ? `Repay debt to ${receiverName}`
         : "Repay debt";
   const date = new Date().toISOString().slice(0, 10);
-  const groupId = crypto.randomUUID();
   const { error: transferError } = await supabase.from("transactions").insert([
     {
       user_id: user.id,
@@ -365,7 +375,11 @@ export async function repayVaultBorrow(
     console.error("Supabase vault borrow repayment transfer failed.", transferError);
     const { error: revertError } = await supabase
       .from("vault_borrows")
-      .update({ outstanding: borrow.outstanding, status: "open" })
+      .update({
+        outstanding: borrow.outstanding,
+        status: "open",
+        repayment_group_ids: borrow.repayment_group_ids ?? [],
+      })
       .eq("id", borrow.id)
       .eq("user_id", user.id);
     if (revertError) {
