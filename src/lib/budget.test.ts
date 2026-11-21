@@ -96,7 +96,7 @@ describe("budgetSpend", () => {
   it("mengabaikan income dan transfer", () => {
     const rows = [
       tx({ type: "income", amount: 500_000, category_id: "cat-food", vault_id: "vault-a" }),
-      tx({ type: "transfer", amount: 300_000, category_id: null, vault_id: "vault-a" }),
+      tx({ type: "transfer", amount: 300_000, category_id: "cat-food", vault_id: "vault-a" }),
       tx({ amount: 20_000, category_id: "cat-food", vault_id: "vault-a" }),
     ];
     expect(budgetSpend(rows, { scope: "category", scope_id: "cat-food", ...PERIOD })).toBe(20_000);

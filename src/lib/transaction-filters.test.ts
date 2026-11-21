@@ -37,7 +37,7 @@ const transactions: Row[] = [
     type: "transfer",
     date: "2026-10-20",
     amount: 75_000,
-    category_id: null,
+    category_id: "investment",
     funding_source_id: "bonus",
     vault_id: "daily",
     note: "Move to savings",
@@ -46,7 +46,7 @@ const transactions: Row[] = [
     type: "transfer",
     date: "2026-10-20",
     amount: 75_000,
-    category_id: null,
+    category_id: "investment",
     funding_source_id: "bonus",
     vault_id: "savings",
     note: "Move from daily",
@@ -97,6 +97,13 @@ describe("filterTransactions", () => {
 
   it("keeps both transfer legs when filtering by funding source", () => {
     expect(select({ type: "transfer", fundingSourceId: "bonus" })).toEqual([
+      transactions[3],
+      transactions[4],
+    ]);
+  });
+
+  it("keeps both categorized transfer legs when filtering by category", () => {
+    expect(select({ type: "transfer", categoryId: "investment" })).toEqual([
       transactions[3],
       transactions[4],
     ]);

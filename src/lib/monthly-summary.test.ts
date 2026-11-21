@@ -11,7 +11,7 @@ describe("buildMonthlySummary", () => {
         { type: "expense", amount: 700, date: "2026-10-03", category_id: food.id, category: food },
         { type: "expense", amount: 200, date: "2026-10-04", category_id: food.id, category: food },
         { type: "expense", amount: 400, date: "2026-10-05", category_id: transport.id, category: transport },
-        { type: "transfer", amount: 2_000, date: "2026-10-06", category_id: null },
+        { type: "transfer", amount: 2_000, date: "2026-10-06", category_id: food.id, category: food },
         { type: "expense", amount: 9_000, date: "2026-09-30", category_id: food.id, category: food },
       ],
       "2026-10"

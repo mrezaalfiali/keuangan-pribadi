@@ -370,6 +370,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [recurringAllocationMode, setRecurringAllocationMode] = useState<"auto" | "single">("auto");
   const [recurringIntervalCount, setRecurringIntervalCount] = useState(1);
   const [editVaultId, setEditVaultId] = useState("");
+  const [editTransferDestVaultId, setEditTransferDestVaultId] = useState("");
   const [editFundingSourceId, setEditFundingSourceId] = useState("");
   const [budgetBorrows, setBudgetBorrows] = useState<BudgetBorrow[]>([]);
   /**
@@ -701,9 +702,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       : filterType === "income"
         ? incomeCategories
         : filterType === "transfer"
-          // Transfer tidak punya kategori; menampilkan daftar kategori di sini
-          // hanya menghasilkan filter yang tidak mungkin cocok.
-          ? []
+          // Transfer memakai kategori pengeluaran (alasan memindahkan dana);
+          // kedua leg selalu membawa kategori yang sama sehingga keduanya
+          // tetap cocok saat difilter.
+          ? expenseCategories
           : [...incomeCategories, ...expenseCategories]
   );
   const vaultOptions = vaults.filter((vault) => usedVaultIds.has(vault.id));
@@ -1403,13 +1405,39 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     }
   }
 
-  function startEditingTransaction(transaction: TxRow) {
+  async function startEditingTransaction(transaction: TxRow) {
     setMobileActionsTxId(null);
     setEditError("");
     dismissBorrowFlow();
-    setEditingTransaction(transaction);
-    setEditVaultId(transaction.vault_id ?? "");
+    setEditTransferDestVaultId("");
     setEditFundingSourceId(transaction.funding_source_id ?? "");
+    if (transaction.type === "transfer" && transaction.group_id) {
+      const { data: legs, error: legsError } = await createClient()
+        .from("transactions")
+        .select("id, vault_id, transfer_direction")
+        .eq("group_id", transaction.group_id);
+      if (legsError) {
+        logSupabaseError("finance.loadTransferEditLegs", legsError);
+        setError(settings("saveError"));
+        return;
+      }
+      const outgoing = legs?.find((leg) => leg.transfer_direction === "out");
+      const incoming = legs?.find((leg) => leg.transfer_direction === "in");
+      if (
+        legs?.length === 2 &&
+        outgoing?.vault_id &&
+        incoming?.vault_id &&
+        outgoing.vault_id !== incoming.vault_id
+      ) {
+        setEditVaultId(outgoing.vault_id);
+        setEditTransferDestVaultId(incoming.vault_id);
+      } else {
+        setEditVaultId(transaction.vault_id ?? "");
+      }
+    } else {
+      setEditVaultId(transaction.vault_id ?? "");
+    }
+    setEditingTransaction(transaction);
   }
 
   function duplicateTransaction(transaction: TxRow) {
@@ -1433,6 +1461,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
     setAddFormKey((key) => key + 1);
     setAddFormOpen(true);
     setEditingTransaction(null);
+    setEditTransferDestVaultId("");
     dismissBorrowFlow();
     document.getElementById("transaction-add-form")?.scrollIntoView({
       behavior: "smooth",
@@ -1481,10 +1510,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         amount,
         date: String(formData.get("date") ?? ""),
         categoryId: String(formData.get("categoryId") ?? "") || null,
-        fundingSourceId: editingTransaction.type === "expense"
+        fundingSourceId: editingTransaction.type === "expense" || editingTransaction.type === "transfer"
           ? String(formData.get("fundingSourceId") ?? "") || null
           : null,
-        vaultId: String(formData.get("vaultId") ?? "") || null,
+        vaultId: editingTransaction.type === "transfer"
+          ? null
+          : String(formData.get("vaultId") ?? "") || null,
         note: String(formData.get("note") ?? "") || null,
       });
       if (!result.ok) {
@@ -1493,6 +1524,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         else if (result.error === "transactions.insufficientSource") setEditError(txText("insufficientSource"));
         else if (result.error === "transactions.sourceNotInVault") setEditError(txText("sourceNotInVault"));
         else if (result.error === "transactions.noSource") setEditError(emptySourceHint);
+        else if (result.error === "err.source") setEditError(txText("noSource"));
+        else if (result.error === "err.category") setEditError(txText("categoryInvalid"));
+        else if (result.error === "transactions.transferLinkedBlocked") setEditError(txText("transferLinkedBlocked"));
         else if (result.error === "transactions.insufficient") setEditError(txText("insufficient"));
         else if (result.error === "transactions.lockedError") setEditError(txText("lockedError"));
         else if (result.error === "transactions.expenseVaultRequired") setEditError(txText("expenseVaultRequired"));
@@ -1527,6 +1561,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         return;
       }
       setEditingTransaction(null);
+      setEditTransferDestVaultId("");
       setNotice(txText("editSaved"));
       await load();
     } catch (editError) {
@@ -1769,7 +1804,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
             ))}
           </select>
         </Field>
-        {transaction.type === "expense" && (
+        {(transaction.type === "expense" || transaction.type === "transfer") && (
           <Field
             label={txText("fundingSource")}
             hint={!editVaultId ? txText("selectVaultFirst") : sourcesInVault(editVaultId, editFundingSourceId).length === 0 ? txText("noSourceInVault") : undefined}
@@ -1792,7 +1827,9 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         <Field
           label={txText("sourceVault")}
           hint={
-            transaction.type === "expense" || transaction.type === "income"
+            transaction.type === "transfer"
+              ? undefined
+              : transaction.type === "expense" || transaction.type === "income"
               ? vaults.length === 0
                 ? txText("recurringVaultNone")
                 : editVaultId
@@ -1811,14 +1848,30 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
               setEditFundingSourceId("");
             }}
             required={transaction.type === "expense" || transaction.type === "income"}
+            disabled={transaction.type === "transfer"}
             className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
           >
             <option value="" disabled={transaction.type === "expense" || transaction.type === "income"}>{transaction.type === "expense" || transaction.type === "income" ? txText("selectVault") : settings("noVault")}</option>
-            {vaults.filter((vault) => transaction.type === "income" || !vault.is_locked || vault.id === transaction.vault_id).map((vault) => (
+            {vaults.filter((vault) => transaction.type === "transfer"
+              ? vault.id === editVaultId
+              : transaction.type === "income" || !vault.is_locked || vault.id === transaction.vault_id).map((vault) => (
               <option key={vault.id} value={vault.id}>{vaultLabel(vault)}</option>
             ))}
           </select>
         </Field>
+        {transaction.type === "transfer" && editTransferDestVaultId && (
+          <Field label={txText("destinationVault")}>
+            <select
+              value={editTransferDestVaultId}
+              disabled
+              className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink disabled:opacity-60"
+            >
+              <option value={editTransferDestVaultId}>
+                {vaultLabel(vaults.find((vault) => vault.id === editTransferDestVaultId)) ?? editTransferDestVaultId}
+              </option>
+            </select>
+          </Field>
+        )}
         <Field label={txText("note")} className="sm:col-span-2">
           <Input name="note" maxLength={200} defaultValue={transaction.note ?? ""} />
         </Field>
@@ -1836,7 +1889,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         )}
         <div className="flex gap-2 sm:col-span-2">
           <Button type="submit" disabled={savingEdit}>{common("save")}</Button>
-          <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditError(""); dismissBorrowFlow(); }}>{common("cancel")}</Button>
+          <Button type="button" variant="outline" disabled={savingEdit} onClick={() => { setEditingTransaction(null); setEditTransferDestVaultId(""); setEditError(""); dismissBorrowFlow(); }}>{common("cancel")}</Button>
         </div>
       </form>
     );
@@ -2696,18 +2749,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                 </select>
               </Field>
             )}
-            {type !== "transfer" && (
-            <Field label={txText("category")}>
-              <select key={type} name="categoryId" defaultValue={formPrefill?.categoryId ?? ""} required={categories.some((category) => category.type === type)} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
+            <Field
+              label={txText("category")}
+              hint={type === "transfer" ? txText("transferCategoryHint") : undefined}
+            >
+              <select key={type} name="categoryId" defaultValue={formPrefill?.categoryId ?? ""} required={type !== "transfer" && categories.some((category) => category.type === type)} className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink">
                 <option value="">{common("none")}</option>
-                {categories.filter((category) => category.type === type).map((category) => (
+                {categories.filter((category) => category.type === (type === "transfer" ? "expense" : type)).map((category) => (
                   <option key={category.id} value={category.id}>
                     {categoryLabel(category)}
                   </option>
                 ))}
               </select>
             </Field>
-            )}
             {(type === "expense" || type === "transfer") && (
               <Field
                 label={txText("fundingSource")}
@@ -3123,8 +3177,11 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                               locale === "id" ? "id-ID" : "en-US"
                             );
                             const isEditing = editingTransaction?.id === transaction.id;
-                            const supportsEditAndCopy =
-                              transaction.type !== "transfer" && !transaction.group_id;
+                            const supportsEdit =
+                              transaction.type === "transfer"
+                                ? Boolean(transaction.group_id)
+                                : !transaction.group_id;
+                            const supportsCopy = transaction.type !== "transfer" && !transaction.group_id;
                             return (
                               <li key={transaction.id} className="py-1">
                                 <div className="flex items-center gap-2 sm:gap-3 py-2 min-w-0">
@@ -3195,15 +3252,16 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                       >
                                         <button
                                           type="button"
-                                          disabled={!supportsEditAndCopy || savingEdit}
+                                          disabled={!supportsEdit || savingEdit}
                                           onClick={() => {
                                             setMobileActionsTxId(null);
                                             if (isEditing) {
                                               setEditingTransaction(null);
+                                              setEditTransferDestVaultId("");
                                               setEditError("");
                                               dismissBorrowFlow();
                                             } else {
-                                              startEditingTransaction(transaction);
+                                              void startEditingTransaction(transaction);
                                             }
                                           }}
                                           className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
@@ -3213,7 +3271,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                         </button>
                                         <button
                                           type="button"
-                                          disabled={!supportsEditAndCopy || isEditing}
+                                          disabled={!supportsCopy || isEditing}
                                           onClick={() => duplicateTransaction(transaction)}
                                           className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-ink hover:bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
                                         >
@@ -3235,16 +3293,17 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                     )}
                                   </div>
                                   <div className="hidden items-center md:flex">
-                                    {supportsEditAndCopy ? (
+                                    {supportsEdit ? (
                                       <button
                                         type="button"
                                         disabled={savingEdit}
                                         onClick={() => {
                                           if (isEditing) {
                                             setEditingTransaction(null);
+                                            setEditTransferDestVaultId("");
                                             setEditError("");
                                           } else {
-                                            startEditingTransaction(transaction);
+                                            void startEditingTransaction(transaction);
                                           }
                                         }}
                                         aria-label={txText("editTitle")}
@@ -3255,7 +3314,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
                                     ) : (
                                       <span aria-hidden="true" className="h-7 w-7 sm:h-8 sm:w-8 shrink-0" />
                                     )}
-                                    {supportsEditAndCopy && !isEditing ? (
+                                    {supportsCopy && !isEditing ? (
                                       <button
                                         type="button"
                                         onClick={() => duplicateTransaction(transaction)}

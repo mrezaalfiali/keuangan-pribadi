@@ -204,6 +204,7 @@ export async function addTransaction(
     // transfer
     base.vault_id = input.vaultId ?? null;
     base.transfer_direction = "out";
+    base.category_id = input.categoryId || null;
     // Transfer memindahkan uang milik satu sumber: kolam (sumber × vault asal)
     // ikut berpindah, sehingga baris keluar dan masuk membawa sumber yang sama.
     base.funding_source_id = input.fundingSourceId ?? null;
@@ -242,6 +243,21 @@ export async function addTransaction(
     const destinationVaultId = input.destinationVaultId;
     if (!input.fundingSourceId) {
       return { ok: false, error: "transactions.noSource" };
+    }
+    // Kategori transfer bersifat opsional (alasan memindahkan dana), tetapi
+    // kalau diisi harus benar-benar ada dan berasal dari daftar pengeluaran.
+    if (base.category_id) {
+      const { data: category, error: categoryError } = await supabase
+        .from("categories")
+        .select("id, type")
+        .eq("id", base.category_id)
+        .or(`user_id.is.null,user_id.eq.${user.id}`)
+        .maybeSingle();
+      if (categoryError) return { ok: false, error: "err.generic" };
+      if (!category || category.type !== "expense") {
+        return { ok: false, error: "err.category" };
+      }
+      base.category_id = category.id;
     }
     if (
       !sourceVaultId ||
