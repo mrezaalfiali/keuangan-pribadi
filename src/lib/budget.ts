@@ -1,4 +1,10 @@
-import type { Budget, BudgetBorrow, BudgetScope, Transaction } from "./types";
+import type {
+  Budget,
+  BudgetBorrow,
+  BudgetReallocation,
+  BudgetScope,
+  Transaction,
+} from "./types";
 import { todayISO } from "./utils";
 
 /**
@@ -13,17 +19,26 @@ import { todayISO } from "./utils";
  * `spent` selalu dihitung ulang dari ledger, tidak disimpan, supaya tidak bisa
  * basi ketika transaksi lama diedit atau dihapus.
  *
- * Hanya `type === "expense"` yang dihitung, untuk kedua scope. Transfer keluar
- * dari vault mengurangi saldo vault, tetapi bukan pengeluaran — menghitungnya
- * akan membuat batas "makan bulanan" ikut berkurang setiap kali uang pindah.
+ * Expense dihitung untuk kedua scope. Transfer ber-kategori menghitung leg
+ * keluar satu kali pada anggaran kategori; leg masuk tidak menggandakan biaya
+ * dan transfer tanpa kategori tidak memakai anggaran kategori. Transfer tidak
+ * memakai anggaran vault karena hanya memindahkan saldo antar-vault.
  */
 export function budgetSpend(
-  transactions: readonly Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date">[],
+  transactions: readonly (
+    Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> &
+    Partial<Pick<Transaction, "transfer_direction">>
+  )[],
   budget: Pick<Budget, "scope" | "scope_id" | "starts_on" | "ends_on">
 ): number {
   const { starts_on: startsOn, ends_on: endsOn } = budget;
   return transactions.reduce((sum, tx) => {
-    if (tx.type !== "expense") return sum;
+    const isExpense = tx.type === "expense";
+    const isCategorizedTransferOut =
+      budget.scope === "category" &&
+      tx.type === "transfer" &&
+      tx.transfer_direction === "out";
+    if (!isExpense && !isCategorizedTransferOut) return sum;
     // Bandingkan string ISO YYYY-MM-DD secara leksikografis: sama dengan
     // kronologis, dan tidak terpengaruh zona waktu seperti Date parsing.
     if (tx.date < startsOn || tx.date > endsOn) return sum;
@@ -35,13 +50,18 @@ export function budgetSpend(
 export type BudgetTransaction = Pick<
   Transaction,
   "type" | "amount" | "category_id" | "vault_id" | "date"
-> & { id?: number };
+> &
+  Partial<Pick<Transaction, "transfer_direction">> & {
+    id?: number;
+    group_id?: string | null;
+  };
 
 export interface ExpenseCandidate {
   amount: number;
   date: string;
   category_id: string | null;
   vault_id: string | null;
+  type?: "expense" | "transfer";
 }
 
 export interface BudgetConflict {
@@ -63,8 +83,18 @@ export interface BorrowTotals {
   borrowedOut: number;
 }
 
+export interface ReallocationTotals {
+  reallocatedIn: number;
+  reallocatedOut: number;
+}
+
 /** Baris `budget_borrows` -- hanya kolom yang dibutuhkan perhitungan. */
 export type BudgetBorrowRow = Pick<BudgetBorrow, "from_budget_id" | "to_budget_id" | "amount">;
+
+export type BudgetReallocationRow = Pick<
+  BudgetReallocation,
+  "from_budget_id" | "to_budget_id" | "amount" | "reversed_at"
+>;
 
 /**
  * Menjumlahkan pinjaman per baris anggaran: keluar dari pemberi,
@@ -86,17 +116,35 @@ export function aggregateBorrows(
   return totals;
 }
 
+export function aggregateReallocations(
+  reallocations: readonly BudgetReallocationRow[]
+): Map<string, ReallocationTotals> {
+  const totals = new Map<string, ReallocationTotals>();
+  for (const row of reallocations) {
+    if (row.reversed_at) continue;
+    const from = totals.get(row.from_budget_id) ?? { reallocatedIn: 0, reallocatedOut: 0 };
+    from.reallocatedOut += row.amount;
+    totals.set(row.from_budget_id, from);
+    const to = totals.get(row.to_budget_id) ?? { reallocatedIn: 0, reallocatedOut: 0 };
+    to.reallocatedIn += row.amount;
+    totals.set(row.to_budget_id, to);
+  }
+  return totals;
+}
+
 /**
  * Batas efektif sebuah anggaran.
  *
  * Pinjaman tidak mengubah `limit_amount` -- angka rencana yang dilihat
  * pemakai tetap apa adanya. Yang bergeser hanya kapasitas belanja baris
- * periode ini: `limit_amount + dipinjam masuk - dipinjam keluar`.
+ * periode ini: limit awal + pinjaman masuk - pinjaman keluar + alokasi masuk -
+ * alokasi keluar.
  *
  * `leftover_discarded` mencabut sisa anggaran: batas efektif turun ke angka yang
  * sudah terpakai, sehingga statusnya menjadi "penuh" dan pengeluaran baru dianggap
  * melebihi batas. Uangnya memang sudah dipindahkan lewat aksi transfer terpisah —
- * transfer sendiri tidak pernah dihitung sebagai belanja (lihat `budgetSpend`).
+ * transfer keluar berkategori tetap memakai anggaran kategori, tetapi tidak
+ * dihitung pada anggaran vault (lihat `budgetSpend`).
  *
  * Untuk anggaran yang belum ada terpakai sama sekali hasilnya 0: seluruh kuota
  * sudah dialihkan, tidak ada yang boleh dibelanjakan lagi. Angka yang sudah
@@ -106,11 +154,16 @@ export function aggregateBorrows(
 export function budgetEffectiveLimit(
   budget: Pick<Budget, "limit_amount"> & Partial<Pick<Budget, "leftover_discarded">>,
   spent: number,
-  borrows?: BorrowTotals
+  borrows?: BorrowTotals,
+  reallocations?: ReallocationTotals
 ): number {
   const base = Math.max(
     0,
-    budget.limit_amount + (borrows?.borrowedIn ?? 0) - (borrows?.borrowedOut ?? 0)
+    budget.limit_amount +
+      (borrows?.borrowedIn ?? 0) -
+      (borrows?.borrowedOut ?? 0) +
+      (reallocations?.reallocatedIn ?? 0) -
+      (reallocations?.reallocatedOut ?? 0)
   );
   if (!budget.leftover_discarded) return base;
   return Math.max(0, Math.min(base, Math.trunc(spent)));
@@ -133,9 +186,13 @@ export function requiredBorrowTotal(
   budget: Pick<Budget, "limit_amount"> & Partial<Pick<Budget, "leftover_discarded">>,
   spent: number,
   borrows: BorrowTotals | undefined,
-  linkedTotal: number
+  linkedTotal: number,
+  reallocations?: ReallocationTotals
 ): number {
-  return Math.max(0, spent - budgetEffectiveLimit(budget, spent, borrows) + linkedTotal);
+  return Math.max(
+    0,
+    spent - budgetEffectiveLimit(budget, spent, borrows, reallocations) + linkedTotal
+  );
 }
 
 export interface BorrowShrinkPlan {
@@ -211,7 +268,9 @@ export function findExceededBudget(
     Partial<Pick<Budget, "leftover_discarded">>)[],
   candidate: ExpenseCandidate,
   excludeTransactionId?: number,
-  borrows?: ReadonlyMap<string, BorrowTotals>
+  borrows?: ReadonlyMap<string, BorrowTotals>,
+  excludeGroupId?: string | null,
+  reallocations?: ReadonlyMap<string, ReallocationTotals>
 ): BudgetConflict | null {
   const amount = Number(candidate.amount);
   if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -220,6 +279,7 @@ export function findExceededBudget(
 
   for (const budget of budgets) {
     if (candidate.date < budget.starts_on || candidate.date > budget.ends_on) continue;
+    if (candidate.type === "transfer" && budget.scope !== "category") continue;
 
     const matchesScope =
       budget.scope === "category"
@@ -229,11 +289,18 @@ export function findExceededBudget(
 
     const spent = budgetSpend(
       transactions.filter(
-        (tx) => excludeTransactionId === undefined || tx.id !== excludeTransactionId
+        (tx) =>
+          (excludeTransactionId === undefined || tx.id !== excludeTransactionId) &&
+          (excludeGroupId == null || tx.group_id !== excludeGroupId)
       ),
       budget
     );
-    const effectiveLimit = budgetEffectiveLimit(budget, spent, borrows?.get(budget.id));
+    const effectiveLimit = budgetEffectiveLimit(
+      budget,
+      spent,
+      borrows?.get(budget.id),
+      reallocations?.get(budget.id)
+    );
     const projected = spent + amount;
     if (projected <= effectiveLimit) continue;
 
@@ -288,10 +355,12 @@ export function eligibleBorrowLenders(
     Partial<Pick<Budget, "leftover_discarded">>)[],
   transactions: readonly BudgetTransaction[],
   borrows: readonly BudgetBorrowRow[],
-  date: string
+  date: string,
+  reallocations: readonly BudgetReallocationRow[] = []
 ): BorrowLenderCandidate[] {
   if (borrower.leftover_discarded) return [];
   const totals = aggregateBorrows(borrows);
+  const reallocationTotals = aggregateReallocations(reallocations);
   const candidates: BorrowLenderCandidate[] = [];
   for (const budget of budgets) {
     if (budget.id === borrower.id) continue;
@@ -299,7 +368,12 @@ export function eligibleBorrowLenders(
     if (budget.leftover_discarded) continue;
     const spent = budgetSpend(transactions, budget);
     const remaining = budgetLeftover(
-      budgetEffectiveLimit(budget, spent, totals.get(budget.id)),
+      budgetEffectiveLimit(
+        budget,
+        spent,
+        totals.get(budget.id),
+        reallocationTotals.get(budget.id)
+      ),
       spent
     );
     if (remaining <= 0) continue;
@@ -341,12 +415,13 @@ export function budgetDisplayStatus(
   budget: Pick<Budget, "limit_amount" | "alert_threshold"> &
     Partial<Pick<Budget, "leftover_discarded">>,
   spent: number,
-  borrows?: BorrowTotals
+  borrows?: BorrowTotals,
+  reallocations?: ReallocationTotals
 ): BudgetStatus {
   if (budget.leftover_discarded) return "full";
   return budgetStatus(
     spent,
-    budgetEffectiveLimit(budget, spent, borrows),
+    budgetEffectiveLimit(budget, spent, borrows, reallocations),
     Number(budget.alert_threshold)
   );
 }

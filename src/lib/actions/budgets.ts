@@ -4,12 +4,14 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/src/lib/supabase/server";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   budgetEffectiveLimit,
   budgetLeftover,
   budgetSpend,
   isValidPeriod,
   nextPeriod,
   type BudgetBorrowRow,
+  type BudgetReallocationRow,
   type BudgetPeriod,
 } from "@/src/lib/budget";
 
@@ -160,9 +162,9 @@ export async function carryOverBudget(
   // Sisa dihitung ulang dari ledger, tidak pernah dari nilai yang disimpan di UI.
   const { data: spent, error: spentError } = await supabase
     .from("transactions")
-    .select("type, amount, category_id, vault_id, date")
+    .select("type, amount, category_id, vault_id, date, transfer_direction")
     .eq("user_id", user.id)
-    .eq("type", "expense")
+    .in("type", ["expense", "transfer"])
     .gte("date", source.starts_on)
     .lte("date", source.ends_on);
   if (spentError) return { ok: false, error: "err.generic" };
@@ -174,6 +176,7 @@ export async function carryOverBudget(
       category_id: tx.category_id,
       vault_id: tx.vault_id,
       date: tx.date,
+      transfer_direction: tx.transfer_direction,
     })),
     {
       scope: source.scope,
@@ -195,16 +198,31 @@ export async function carryOverBudget(
     .eq("user_id", user.id);
   if (borrowError) {
     console.error("Supabase budget borrow load failed during carry-over.", borrowError);
+    return { ok: false, error: "err.generic" };
   }
   const borrowTotals = aggregateBorrows((borrowRows ?? []) as BudgetBorrowRow[]).get(
     source.id
   );
+  const { data: reallocationRows, error: reallocationError } = await supabase
+    .from("budget_reallocations")
+    .select("from_budget_id, to_budget_id, amount, reversed_at")
+    .eq("user_id", user.id);
+  if (reallocationError) {
+    console.error("Supabase budget reallocation load failed during carry-over.", reallocationError);
+    return { ok: false, error: "err.generic" };
+  }
+  const reallocationTotals = aggregateReallocations(
+    (reallocationRows ?? []) as BudgetReallocationRow[]
+  ).get(source.id);
 
   // Sisa yang sudah ditutup tidak boleh terbawa: kuotanya sudah dianggap
   // dialihkan, jadi periode berikutnya hanya menerima batas dasarnya saja.
   const leftover = source.leftover_discarded
     ? 0
-    : budgetLeftover(budgetEffectiveLimit(source, spentTotal, borrowTotals), spentTotal);
+    : budgetLeftover(
+        budgetEffectiveLimit(source, spentTotal, borrowTotals, reallocationTotals),
+        spentTotal
+      );
   if (leftover <= 0) return { ok: false, error: "err.noLeftover" };
 
   const { data: alreadyCarried } = await supabase
@@ -310,15 +328,92 @@ export async function deleteBudget(
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { ok: false, error: "err.auth" };
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(budgetId)) {
+    return { ok: false, error: "err.generic" };
+  }
+
+  const { data: linkedReallocations, error: reallocationError } = await supabase
+    .from("budget_reallocations")
+    .select("id")
+    .eq("user_id", user.id)
+    .or(`from_budget_id.eq.${budgetId},to_budget_id.eq.${budgetId}`)
+    .limit(1);
+  if (reallocationError) return { ok: false, error: "err.generic" };
+  if (linkedReallocations?.length) {
+    return { ok: false, error: "err.budgetHasReallocations" };
+  }
 
   const { error } = await supabase
     .from("budgets")
     .delete()
     .eq("id", budgetId)
     .eq("user_id", user.id);
-  if (error) return { ok: false, error: "err.generic" };
+  if (error) {
+    if (error.code === "23503") return { ok: false, error: "err.budgetHasReallocations" };
+    return { ok: false, error: "err.generic" };
+  }
 
   revalidatePath(`/${locale}/budgets`);
+  return { ok: true };
+}
+
+export async function reallocateBudgetRemainder(
+  locale: string,
+  input: { fromBudgetId: string; toBudgetId: string; amount: number }
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.fromBudgetId) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.toBudgetId) ||
+    !Number.isSafeInteger(input.amount) ||
+    input.amount <= 0 ||
+    input.amount > 2_147_483_647
+  ) {
+    return { ok: false, error: "err.reallocationAmount" };
+  }
+
+  const { error } = await supabase.rpc("reallocate_budget_remainder", {
+    p_from_budget_id: input.fromBudgetId,
+    p_to_budget_id: input.toBudgetId,
+    p_amount: input.amount,
+  });
+  if (error) {
+    console.error("Supabase budget reallocation failed.", { code: error.code, message: error.message });
+    return { ok: false, error: error.message.startsWith("err.") ? error.message : "err.generic" };
+  }
+
+  revalidatePath(`/${locale}/budgets`);
+  revalidatePath(`/${locale}/dashboard`);
+  return { ok: true };
+}
+
+export async function undoBudgetReallocation(
+  locale: string,
+  reallocationId: string
+): Promise<ActionResult> {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "err.auth" };
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(reallocationId)) {
+    return { ok: false, error: "err.generic" };
+  }
+
+  const { error } = await supabase.rpc("undo_budget_reallocation", {
+    p_reallocation_id: reallocationId,
+  });
+  if (error) {
+    console.error("Supabase budget reallocation undo failed.", { code: error.code, message: error.message });
+    return { ok: false, error: error.message.startsWith("err.") ? error.message : "err.generic" };
+  }
+
+  revalidatePath(`/${locale}/budgets`);
+  revalidatePath(`/${locale}/dashboard`);
   return { ok: true };
 }
 
@@ -392,22 +487,29 @@ export async function borrowBudget(
 
   // Sisa pemberi dihitung ulang dari ledger dan pinjaman yang sudah
   // berjalan -- tidak pernah dari angka yang dikirim UI.
-  const [spentResult, borrowResult] = await Promise.all([
+  const [spentResult, borrowResult, reallocationResult] = await Promise.all([
     supabase
       .from("transactions")
-      .select("type, amount, category_id, vault_id, date")
+      .select("type, amount, category_id, vault_id, date, transfer_direction")
       .eq("user_id", user.id)
-      .eq("type", "expense")
+      .in("type", ["expense", "transfer"])
       .gte("date", lender.starts_on)
       .lte("date", lender.ends_on),
     supabase
       .from("budget_borrows")
       .select("from_budget_id, to_budget_id, amount")
       .eq("user_id", user.id),
+    supabase
+      .from("budget_reallocations")
+      .select("from_budget_id, to_budget_id, amount, reversed_at")
+      .eq("user_id", user.id),
   ]);
-  if (spentResult.error || borrowResult.error) {
+  if (spentResult.error || borrowResult.error || reallocationResult.error) {
     if (borrowResult.error) {
       console.error("Supabase budget borrow load failed.", borrowResult.error);
+    }
+    if (reallocationResult.error) {
+      console.error("Supabase budget reallocation load failed during borrowing.", reallocationResult.error);
     }
     return { ok: false, error: "err.generic" };
   }
@@ -416,8 +518,11 @@ export async function borrowBudget(
   const lenderTotals = aggregateBorrows(
     (borrowResult.data ?? []) as BudgetBorrowRow[]
   ).get(lender.id);
+  const lenderReallocationTotals = aggregateReallocations(
+    (reallocationResult.data ?? []) as BudgetReallocationRow[]
+  ).get(lender.id);
   const remaining = budgetLeftover(
-    budgetEffectiveLimit(lender, lenderSpent, lenderTotals),
+    budgetEffectiveLimit(lender, lenderSpent, lenderTotals, lenderReallocationTotals),
     lenderSpent
   );
   if (input.amount > remaining) return { ok: false, error: "err.borrowRemaining" };
@@ -434,7 +539,16 @@ export async function borrowBudget(
     .select("id")
     .single();
   if (insertError || !inserted) {
-    if (insertError) console.error("Supabase budget borrow insert failed.", insertError);
+    if (insertError) {
+      console.error("Supabase budget borrow insert failed.", insertError);
+      if (
+        insertError.message === "err.borrowRemaining" ||
+        insertError.message === "err.borrowPeriod" ||
+        insertError.message === "err.borrowNotFound"
+      ) {
+        return { ok: false, error: insertError.message };
+      }
+    }
     return { ok: false, error: "err.generic" };
   }
 

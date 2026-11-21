@@ -43,6 +43,15 @@ async function readAllRows<T>(
   }
 }
 
+function isMissingOptionalTable(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error.code === "42P01" || error.code === "PGRST205")
+  );
+}
+
 export async function exportJson(): Promise<ExportPayload> {
   const supabase = await createClient();
   const {
@@ -193,9 +202,26 @@ export async function exportJson(): Promise<ExportPayload> {
       updated_at: row.updated_at,
     }));
 
+    let budgetReallocations: Record<string, unknown>[] = [];
+    try {
+      budgetReallocations = await readAllRows<Record<string, unknown>>(
+        "budget_reallocations",
+        (from, to) =>
+          supabase
+            .from("budget_reallocations")
+            .select("id, from_budget_id, to_budget_id, amount, created_at, reversed_at, reversed_by")
+            .eq("user_id", user.id)
+            .order("id")
+            .range(from, to)
+      );
+    } catch (reallocationError) {
+      if (!isMissingOptionalTable(reallocationError)) throw reallocationError;
+      console.warn("Could not read budget_reallocations for backup export (migration may not be applied yet).");
+    }
+
     const totalRows = transactions.length + vaults.length + categories.length + budgets.length +
       allocationRules.length + allocationSlots.length + recurringTransactions.length + budgetBorrows.length +
-      vaultBorrows.length + categoryOverrides.length;
+      vaultBorrows.length + categoryOverrides.length + budgetReallocations.length;
     if (totalRows > MAX_BACKUP_ROWS) throw new Error("backup.export.tooManyRows");
 
     const data = JSON.stringify(
@@ -212,6 +238,7 @@ export async function exportJson(): Promise<ExportPayload> {
         budget_borrows: budgetBorrows,
         vault_borrows: vaultBorrows,
         category_overrides: categoryOverrides,
+        budget_reallocations: budgetReallocations,
         allocation_rules: allocationRules,
         allocation_slots: allocationSlots,
         recurring_transactions: recurringTransactions,

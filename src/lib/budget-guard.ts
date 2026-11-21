@@ -1,9 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   findExceededBudget,
   type BudgetBorrowRow,
   type BudgetConflict,
+  type BudgetReallocationRow,
+  type BudgetTransaction,
   type ExpenseCandidate,
 } from "@/src/lib/budget";
 
@@ -41,9 +44,9 @@ export function budgetRejection(conflict: BudgetConflict): BudgetRejection {
 }
 
 /**
- * Validasi pengeluaran terhadap seluruh anggaran yang periodenya mencakup
- * tanggal transaksi. Dipakai sebelum insert maupun RPC edit agar batas anggaran
- * tidak bisa dilewati lewat salah satu jalur saja.
+ * Validasi expense dan transfer berkategori terhadap anggaran yang periodenya
+ * mencakup tanggal transaksi. Dipakai sebelum insert maupun RPC edit agar batas
+ * anggaran tidak bisa dilewati lewat salah satu jalur saja.
  *
  * Pinjaman yang sedang berjalan ikut diperhitungkan lewat batas efektif.
  * Tabel `budget_borrows` datang dari migrasi 0028 yang dijalankan manual;
@@ -54,7 +57,8 @@ export async function checkExpenseBudget(
   supabase: SupabaseClient,
   userId: string,
   candidate: ExpenseCandidate,
-  excludeTransactionId?: number
+  excludeTransactionId?: number,
+  excludeGroupId?: string | null
 ): Promise<BudgetGuardResult> {
   const { data: budgets, error: budgetError } = await supabase
     .from("budgets")
@@ -71,8 +75,21 @@ export async function checkExpenseBudget(
     .eq("user_id", userId);
   if (borrowError) {
     console.error("Supabase budget borrow load failed during guard.", borrowError);
+    return { ok: false, error: "err.generic" };
   }
   const borrows = aggregateBorrows((borrowRows ?? []) as BudgetBorrowRow[]);
+
+  const { data: reallocationRows, error: reallocationError } = await supabase
+    .from("budget_reallocations")
+    .select("from_budget_id, to_budget_id, amount, reversed_at")
+    .eq("user_id", userId);
+  if (reallocationError) {
+    console.error("Supabase budget reallocation load failed during guard.", reallocationError);
+    return { ok: false, error: "err.generic" };
+  }
+  const reallocations = aggregateReallocations(
+    (reallocationRows ?? []) as BudgetReallocationRow[]
+  );
 
   const startsOn = budgets.reduce(
     (earliest, budget) => (budget.starts_on < earliest ? budget.starts_on : earliest),
@@ -85,22 +102,15 @@ export async function checkExpenseBudget(
 
   const { data: transactions, error: transactionError } = await supabase
     .from("transactions")
-    .select("id, type, amount, category_id, vault_id, date")
+    .select("id, type, amount, category_id, vault_id, date, transfer_direction, group_id")
     .eq("user_id", userId)
-    .eq("type", "expense")
+    .in("type", ["expense", "transfer"])
     .gte("date", startsOn)
     .lte("date", endsOn);
   if (transactionError) return { ok: false, error: "err.generic" };
 
   const conflict = findExceededBudget(
-    (transactions ?? []) as {
-      id: number;
-      type: "expense";
-      amount: number;
-      category_id: string | null;
-      vault_id: string | null;
-      date: string;
-    }[],
+    (transactions ?? []) as BudgetTransaction[],
     budgets as {
       id: string;
       scope: "category" | "vault";
@@ -112,7 +122,9 @@ export async function checkExpenseBudget(
     }[],
     candidate,
     excludeTransactionId,
-    borrows
+    borrows,
+    excludeGroupId,
+    reallocations
   );
 
   if (conflict) return { ok: false, conflict };

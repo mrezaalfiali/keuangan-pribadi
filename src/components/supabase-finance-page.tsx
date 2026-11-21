@@ -29,6 +29,7 @@ import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { buildMonthlySummary, shiftMonth } from "@/src/lib/monthly-summary";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   budgetDisplayStatus,
   budgetEffectiveLimit,
   budgetSpend,
@@ -50,7 +51,15 @@ import {
   skipRecurringOccurrence,
   snoozeRecurringOccurrence,
 } from "@/src/lib/actions/recurring";
-import type { Budget, BudgetBorrow, Category, RecurringTransaction, Transaction, Vault } from "@/src/lib/types";
+import type {
+  Budget,
+  BudgetBorrow,
+  BudgetReallocation,
+  Category,
+  RecurringTransaction,
+  Transaction,
+  Vault,
+} from "@/src/lib/types";
 
 type CategoryRef = Pick<Category, "id" | "slug" | "name_key">;
 
@@ -373,6 +382,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const [editTransferDestVaultId, setEditTransferDestVaultId] = useState("");
   const [editFundingSourceId, setEditFundingSourceId] = useState("");
   const [budgetBorrows, setBudgetBorrows] = useState<BudgetBorrow[]>([]);
+  const [budgetReallocations, setBudgetReallocations] = useState<BudgetReallocation[]>([]);
   /**
    * Penolakan anggaran yang masih bisa ditutup lewat pinjaman. Menyimpan
    * form yang sedang terpasang supaya setelah pinjaman tercatat, simpan
@@ -539,7 +549,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       if (authError) throw authError;
       if (!user) throw new Error("Session Supabase tidak ditemukan.");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [txResult, vaultResult, budgetResult, recurringResult, overrideResult, borrowResult] = await Promise.all([
+      const [txResult, vaultResult, budgetResult, recurringResult, overrideResult, borrowResult, reallocationResult] = await Promise.all([
         supabase.from("transactions")
           .select("*, vault:vaults(id,slug,name,is_locked), category:categories!transactions_category_id_fkey(id,slug,name_key), funding:categories!transactions_funding_source_id_fkey(id,slug,name_key)")
           .eq("user_id", user.id)
@@ -559,23 +569,25 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
         supabase.from("category_overrides")
           .select("category_id, custom_name, hidden")
           .eq("user_id", user.id),
-        // Migrasi 0028 dijalankan manual; tanpa tabel pinjaman, form tetap
-        // harus bisa menampilkan transaksi -- daftar kosong bukan kegagalan.
+        // Riwayat pinjaman dan alokasi dipakai untuk menghitung batas efektif
+        // sebelum menawarkan transaksi yang ditolak karena anggaran.
         supabase.from("budget_borrows")
           .select("*")
+          .eq("user_id", user.id),
+        supabase.from("budget_reallocations")
+          .select("from_budget_id, to_budget_id, amount, reversed_at")
           .eq("user_id", user.id),
       ]);
       if (txResult.error) throw txResult.error;
       if (vaultResult.error) throw vaultResult.error;
       if (budgetResult.error) throw budgetResult.error;
+      if (borrowResult.error) throw borrowResult.error;
+      if (reallocationResult.error) throw reallocationResult.error;
       if (recurringResult.error) throw recurringResult.error;
       if (overrideResult.error) {
         // Migrasi 0022 dijalankan manual. Jangan kunci seluruh dashboard hanya
         // karena tabel override belum ada; sumber tetap tampil dengan nama asli.
         logSupabaseError("finance.loadSourceOverrides", overrideResult.error);
-      }
-      if (borrowResult.error) {
-        logSupabaseError("finance.loadBudgetBorrows", borrowResult.error);
       }
       const overrides = (overrideResult.data ?? []) as SourceOverride[];
       setTransactions((txResult.data ?? []) as TxRow[]);
@@ -585,6 +597,7 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       setAllCategories(sortByLabel(categories, categoryName, locale));
       setBudgets((budgetResult.data ?? []) as Budget[]);
       setBudgetBorrows((borrowResult.data ?? []) as BudgetBorrow[]);
+      setBudgetReallocations((reallocationResult.data ?? []) as BudgetReallocation[]);
       setRecurringTemplates((recurringResult.data ?? []) as RecurringTransaction[]);
     } catch (loadError) {
       logSupabaseError("finance.load", loadError);
@@ -613,10 +626,19 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
   const monthlySummary = buildMonthlySummary(transactions, summaryMonth);
   const previousMonthlySummary = buildMonthlySummary(transactions, previousSummaryMonth);
   const borrowTotals = useMemo(() => aggregateBorrows(budgetBorrows), [budgetBorrows]);
+  const reallocationTotals = useMemo(
+    () => aggregateReallocations(budgetReallocations),
+    [budgetReallocations]
+  );
   const budgetAlerts = budgets.flatMap((budget) => {
     if (budgetState(budget, todayISO()) !== "active") return [];
     const spent = budgetSpend(transactions, budget);
-    const status = budgetDisplayStatus(budget, spent, borrowTotals.get(budget.id));
+    const status = budgetDisplayStatus(
+      budget,
+      spent,
+      borrowTotals.get(budget.id),
+      reallocationTotals.get(budget.id)
+    );
     if (status === "ok") return [];
     const targetLabel = budget.scope === "vault"
       ? vaultLabel(vaults.find((vault) => vault.id === budget.scope_id))
@@ -626,7 +648,12 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       status,
       label: targetLabel ?? dashboard(budget.scope === "vault" ? "budgetVault" : "budgetCategory"),
       spent,
-      limit: budgetEffectiveLimit(budget, spent, borrowTotals.get(budget.id)),
+      limit: budgetEffectiveLimit(
+        budget,
+        spent,
+        borrowTotals.get(budget.id),
+        reallocationTotals.get(budget.id)
+      ),
     }];
   });
   const onboardingSteps = getOnboardingSteps(transactions, vaults, budgets, todayJakartaISO());
@@ -1641,9 +1668,10 @@ export function SupabaseFinancePage({ section }: { section: "dashboard" | "trans
       budgets,
       transactions,
       budgetBorrows,
-      borrowRejection.date
+      borrowRejection.date,
+      budgetReallocations
     );
-  }, [borrowRejection, budgets, transactions, budgetBorrows]);
+  }, [borrowRejection, budgets, transactions, budgetBorrows, budgetReallocations]);
 
   /**
    * Kandidat pemberi pinjaman vault: vault lain yang bisa mengeluarkan uang

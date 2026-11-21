@@ -43,7 +43,16 @@ import { Progress } from "@/src/components/ui/progress";
 import { createVault, deleteVault, toggleVaultLock, updateVault } from "@/src/lib/actions/vaults";
 import { repayVaultBorrow } from "@/src/lib/actions/vault-borrows";
 import { type VaultBorrowRow } from "@/src/lib/vault-borrow";
-import { carryOverBudget, copyBudgetPeriod, deleteBorrow, deleteBudget, saveBudget, setLeftoverDiscarded } from "@/src/lib/actions/budgets";
+import {
+  carryOverBudget,
+  copyBudgetPeriod,
+  deleteBorrow,
+  deleteBudget,
+  reallocateBudgetRemainder,
+  saveBudget,
+  setLeftoverDiscarded,
+  undoBudgetReallocation,
+} from "@/src/lib/actions/budgets";
 import { deleteAllocationRule, saveAllocationRule, setActiveRule } from "@/src/lib/actions/allocation";
 import { saveDisplayName } from "@/src/lib/actions/profile";
 import { exportJson } from "@/src/lib/actions/export";
@@ -55,6 +64,7 @@ import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { previewAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   budgetDisplayStatus,
   budgetEffectiveLimit,
   budgetLeftover,
@@ -80,6 +90,7 @@ import type {
   AllocationSlot,
   Budget,
   BudgetBorrow,
+  BudgetReallocation,
   BudgetScope,
   Category,
   GamificationState,
@@ -141,6 +152,10 @@ export function SupabaseToolsPage({ section }: Props) {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [budgetBorrows, setBudgetBorrows] = useState<BudgetBorrow[]>([]);
+  const [budgetReallocations, setBudgetReallocations] = useState<BudgetReallocation[]>([]);
+  const [reallocationSourceId, setReallocationSourceId] = useState("");
+  const [reallocationTargetId, setReallocationTargetId] = useState("");
+  const [reallocationAmount, setReallocationAmount] = useState("");
   /** Utang pinjaman antar vault; hanya yang tampil di kartu vault yang dibaca. */
   const [vaultBorrows, setVaultBorrows] = useState<VaultBorrowRow[]>([]);
   /** Baris utang yang sedang dibuka input nominal bayarnya (inline, satu per kartu). */
@@ -236,7 +251,7 @@ export function SupabaseToolsPage({ section }: Props) {
       setUserId(user.id);
       setEmail(user.email ?? "");
       const categories = await ensureDefaultCategories(supabase, user.id);
-      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult, vaultBorrowResult, overrideResult] = await Promise.all([
+      const [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult, pointsLogResult, notesResult, borrowResult, vaultBorrowResult, overrideResult, reallocationResult] = await Promise.all([
         supabase.from("vaults").select("*").eq("user_id", user.id).order("priority"),
         supabase.from("transactions").select("*").eq("user_id", user.id).order("date", { ascending: false }),
         supabase.from("budgets").select("*").eq("user_id", user.id).order("starts_on", { ascending: false }),
@@ -247,8 +262,8 @@ export function SupabaseToolsPage({ section }: Props) {
         supabase.from("user_achievements").select("achievement_id,unlocked_at").eq("user_id", user.id),
         supabase.from("points_log").select("*").eq("user_id", user.id).order("created_at", { ascending: false }).limit(20),
         supabase.from("notes").select("id").eq("user_id", user.id),
-        // Migrasi 0028 dijalankan manual; tanpa tabel pinjaman, daftar anggaran
-        // tetap harus tampil -- kosong bukan kegagalan.
+        // Anggaran aktif membutuhkan riwayat pinjaman dan alokasi agar sisa
+        // yang ditampilkan tidak melebihi kapasitas sebenarnya.
         supabase.from("budget_borrows").select("*").eq("user_id", user.id),
         // Migrasi 0030 juga manual; tanpa tabel utang, kartu vault tetap tampil
         // tanpa catatan utang -- kosong bukan kegagalan.
@@ -256,10 +271,13 @@ export function SupabaseToolsPage({ section }: Props) {
         // Rename kategori per akun: label scope anggaran harus memakai nama
         // hasil rename, bukan nama asli katalog bersama.
         supabase.from("category_overrides").select("category_id, custom_name, hidden").eq("user_id", user.id),
+        supabase.from("budget_reallocations").select("*").eq("user_id", user.id),
       ]);
       const results = [vaultResult, txResult, budgetResult, ruleResult, profileResult, gameResult, achievementResult, userAchievementResult];
       const failed = results.find((result) => result.error);
       if (failed?.error) throw failed.error;
+      if (borrowResult.error) throw borrowResult.error;
+      if (reallocationResult.error) throw reallocationResult.error;
       setVaults(sortByLabel((vaultResult.data ?? []) as Vault[], categoryName, locale));
       setTransactions((txResult.data ?? []) as Transaction[]);
       setBudgets((budgetResult.data ?? []) as Budget[]);
@@ -274,10 +292,8 @@ export function SupabaseToolsPage({ section }: Props) {
       if (!notesResult.error && notesResult.data) {
         setNotesCount(notesResult.data.length);
       }
-      if (borrowResult.error) {
-        logSupabaseError("tools.loadBudgetBorrows", borrowResult.error);
-      }
       setBudgetBorrows((borrowResult.data ?? []) as BudgetBorrow[]);
+      setBudgetReallocations((reallocationResult.data ?? []) as BudgetReallocation[]);
       if (vaultBorrowResult.error) {
         logSupabaseError("tools.loadVaultBorrows", vaultBorrowResult.error);
       }
@@ -336,6 +352,10 @@ export function SupabaseToolsPage({ section }: Props) {
   // Dideklarasikan sebelum penyaringan anggaran karena sortir periode aktif
   // membaca sisa efektif lewat `borrowTotals`.
   const borrowTotals = useMemo(() => aggregateBorrows(budgetBorrows), [budgetBorrows]);
+  const reallocationTotals = useMemo(
+    () => aggregateReallocations(budgetReallocations),
+    [budgetReallocations]
+  );
   // Anggaran tidak lagi dikunci ke bulan kalender, jadi yang dikelompokkan adalah
   // posisinya terhadap hari ini: periode aktif di atas, periode yang sudah
   // berakhir (satu-satunya yang punya sisa) di bawahnya.
@@ -363,6 +383,12 @@ export function SupabaseToolsPage({ section }: Props) {
       ? vaults.find((vault) => vault.id === budget.scope_id)
       : categories.find((category) => category.id === budget.scope_id);
     return target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
+  }
+
+  function hasReallocationHistory(budgetId: string) {
+    return budgetReallocations.some(
+      (row) => row.from_budget_id === budgetId || row.to_budget_id === budgetId
+    );
   }
 
   /**
@@ -410,6 +436,99 @@ export function SupabaseToolsPage({ section }: Props) {
       if (!result.ok) throw new Error(result.error);
       setBudgetNotice(t("borrowCancelled"));
     });
+  }
+
+  async function submitReallocation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const sourceRow = activeCategoryBudgets.find(
+      (row) => row.budget.id === reallocationSourceId
+    );
+    const target = activeCategoryBudgets.find(
+      (row) => row.budget.id === reallocationTargetId
+    )?.budget;
+    const amount = Math.trunc(Number(reallocationAmount));
+    if (!sourceRow || !target || !Number.isSafeInteger(amount) || amount <= 0) return;
+    const remaining = leftoverOf(sourceRow);
+    if (amount > remaining) {
+      setError(t("errReallocationRemaining"));
+      return;
+    }
+    if (!window.confirm(t("reallocationConfirm", {
+      amount: money(amount, locale),
+      from: budgetScopeLabel(sourceRow.budget),
+      to: budgetScopeLabel(target),
+    }))) {
+      return;
+    }
+    const succeeded = await completeAction(async () => {
+      const result = await reallocateBudgetRemainder(locale, {
+        fromBudgetId: sourceRow.budget.id,
+        toBudgetId: target.id,
+        amount,
+      });
+      if (!result.ok) throw new Error(result.error);
+      setBudgetNotice(t("reallocated", {
+        amount: money(amount, locale),
+        from: budgetScopeLabel(sourceRow.budget),
+        to: budgetScopeLabel(target),
+      }));
+      setReallocationSourceId("");
+    });
+    if (succeeded) setReallocationAmount("");
+  }
+
+  async function cancelReallocation(reallocation: BudgetReallocation) {
+    if (!window.confirm(t("undoReallocationConfirm", {
+      amount: money(reallocation.amount, locale),
+    }))) {
+      return;
+    }
+    await completeAction(async () => {
+      const result = await undoBudgetReallocation(locale, reallocation.id);
+      if (!result.ok) throw new Error(result.error);
+      setBudgetNotice(t("reallocationUndone", {
+        amount: money(reallocation.amount, locale),
+      }));
+    });
+  }
+
+  function reallocationBlock(budget: Budget) {
+    const rows = budgetReallocations.filter(
+      (row) => row.from_budget_id === budget.id || row.to_budget_id === budget.id
+    );
+    if (rows.length === 0) return null;
+    return (
+      <div className="mt-2 space-y-1.5 border-t border-line pt-2">
+        {rows.map((reallocation) => {
+          const isIncoming = reallocation.to_budget_id === budget.id;
+          const otherId = isIncoming ? reallocation.from_budget_id : reallocation.to_budget_id;
+          const other = budgets.find((row) => row.id === otherId);
+          const otherLabel = other ? budgetScopeLabel(other) : t("scopeCategory");
+          return (
+            <div key={reallocation.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className={reallocation.reversed_at ? "text-faint" : isIncoming ? "text-accent" : "text-muted"}>
+                {reallocation.reversed_at
+                  ? t("reallocationReversed", { amount: money(reallocation.amount, locale), other: otherLabel })
+                  : t(isIncoming ? "reallocatedIn" : "reallocatedOut", {
+                      amount: money(reallocation.amount, locale),
+                      other: otherLabel,
+                    })}
+              </span>
+              {isIncoming && !reallocation.reversed_at && (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void cancelReallocation(reallocation)}
+                  className="shrink-0 rounded-lg border border-line px-2 py-1 text-[11px] text-muted hover:bg-surface2 disabled:opacity-40"
+                >
+                  {t("undoReallocation")}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
   }
 
   /**
@@ -543,6 +662,24 @@ function budgetErrorMessage(code: unknown) {
       return t("errBorrowDiscarded");
     case "err.borrowRemaining":
       return t("errBorrowRemaining");
+    case "err.reallocationSame":
+      return t("errReallocationSame");
+    case "err.reallocationAmount":
+      return t("errReallocationAmount");
+    case "err.reallocationNotFound":
+      return t("errReallocationNotFound");
+    case "err.reallocationPeriod":
+      return t("errReallocationPeriod");
+    case "err.reallocationDiscarded":
+      return t("errReallocationDiscarded");
+    case "err.reallocationRemaining":
+      return t("errReallocationRemaining");
+    case "err.reallocationUsed":
+      return t("errReallocationUsed");
+    case "err.reallocationNotActive":
+      return t("errReallocationNotActive");
+    case "err.budgetHasReallocations":
+      return t("errBudgetHasReallocations");
     case "err.borrowAmount":
       return t("errBorrowAmount");
     case "err.borrowSame":
@@ -646,10 +783,33 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
   /** Sisa periode yang berakhir; 0 kalau sudah habis atau sudah dibawa. */
   function leftoverOf(row: { budget: Budget; spent: number }) {
     return budgetLeftover(
-      budgetEffectiveLimit(row.budget, row.spent, borrowTotals.get(row.budget.id)),
+      budgetEffectiveLimit(
+        row.budget,
+        row.spent,
+        borrowTotals.get(row.budget.id),
+        reallocationTotals.get(row.budget.id)
+      ),
       row.spent
     );
   }
+
+  const activeCategoryBudgets = activeBudgets.filter((row) => row.budget.scope === "category");
+  const reallocationSource = activeCategoryBudgets.find(
+    (row) => row.budget.id === reallocationSourceId
+  );
+  const reallocationTargets = reallocationSource
+    ? activeCategoryBudgets.filter(
+        (row) =>
+          row.budget.id !== reallocationSource.budget.id &&
+          !row.budget.leftover_discarded &&
+          row.budget.starts_on === reallocationSource.budget.starts_on &&
+          row.budget.ends_on === reallocationSource.budget.ends_on
+      )
+    : [];
+  const totalActiveCategoryRemaining = activeCategoryBudgets.reduce(
+    (total, row) => total + leftoverOf(row),
+    0
+  );
 
   const pendingEndedBudgets = endedBudgets.filter((row) => leftoverOf(row) > 0 && !carriedOverIds.has(row.budget.id) && !row.budget.leftover_discarded);
   const visibleEnded = showEndedHistory ? endedBudgets : pendingEndedBudgets;
@@ -674,7 +834,12 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
   function budgetRowExpanded(budget: Budget, spent: number) {
     const override = budgetRowOpen[budget.id];
     if (override !== undefined) return override;
-    const status = budgetDisplayStatus(budget, spent, borrowTotals.get(budget.id));
+    const status = budgetDisplayStatus(
+      budget,
+      spent,
+      borrowTotals.get(budget.id),
+      reallocationTotals.get(budget.id)
+    );
     return status !== "full" && status !== "exceeded";
   }
 
@@ -706,7 +871,12 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
   async function updateLeftoverDiscard(row: { budget: Budget; spent: number }, discarded: boolean) {
     if (discarded && budgetState(row.budget, todayISO()) === "active") {
       const leftover = budgetLeftover(
-        budgetEffectiveLimit(row.budget, row.spent, borrowTotals.get(row.budget.id)),
+        budgetEffectiveLimit(
+          row.budget,
+          row.spent,
+          borrowTotals.get(row.budget.id),
+          reallocationTotals.get(row.budget.id)
+        ),
         row.spent
       );
       const proceed = window.confirm(t("closeLeftoverConfirm", {
@@ -1016,10 +1186,32 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
             <Card><CardContent className="p-5"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-surface2 text-accent"><Target size={18} /></span><div><h2 className="font-display text-lg font-semibold text-ink">{t("title")}</h2><p className="text-xs text-muted">{t("activePeriods")}</p></div></div>{activeBudgets.length === 0 ? <p className="mt-6 text-sm text-muted">{t("noActive")}</p> : <ul className="mt-4 divide-y divide-line">{activeBudgets.map((row) => {
             const { budget, spent } = row;
             const discarded = budget.leftover_discarded;
-            const effectiveLimit = budgetEffectiveLimit(budget, spent, borrowTotals.get(budget.id));
-            const status = budgetDisplayStatus(budget, spent, borrowTotals.get(budget.id));
+            const effectiveLimit = budgetEffectiveLimit(
+              budget,
+              spent,
+              borrowTotals.get(budget.id),
+              reallocationTotals.get(budget.id)
+            );
+            const status = budgetDisplayStatus(
+              budget,
+              spent,
+              borrowTotals.get(budget.id),
+              reallocationTotals.get(budget.id)
+            );
             const rowOpen = budgetRowExpanded(budget, spent);
             const remaining = budgetLeftover(effectiveLimit, spent);
+            const reallocationTargetsForRow = budget.scope === "category"
+              ? activeCategoryBudgets.filter(
+                  (candidate) =>
+                    candidate.budget.id !== budget.id &&
+                    !candidate.budget.leftover_discarded &&
+                    candidate.budget.starts_on === budget.starts_on &&
+                    candidate.budget.ends_on === budget.ends_on
+                )
+              : [];
+            const canReallocate =
+              !discarded && remaining > 0 && reallocationTargetsForRow.length > 0;
+            const hasReallocation = hasReallocationHistory(budget.id);
             const target = budget.scope === "vault"
               ? vaults.find((vault) => vault.id === budget.scope_id)
               : categories.find((category) => category.id === budget.scope_id);
@@ -1031,8 +1223,240 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                 && other.scope_id === budget.scope_id
                 && other.starts_on === following?.startsOn
             );
-            return <li key={budget.id} className="py-4"><div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2"><div className="min-w-0"><p className="font-medium text-ink">{label}</p>{rowOpen && <><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(effectiveLimit, locale)}</p>{budget.scope === "category" && <div className="mt-2 flex max-w-sm items-center justify-between gap-3 rounded-lg border border-line bg-bg1/60 px-3 py-2"><span className="text-xs text-muted">{t("availableToSpend")}</span><span className={`num text-sm font-semibold ${remaining > 0 ? "text-ink" : "text-faint"}`}>{money(remaining, locale)}</span></div>}</>}</div><div className="ml-auto flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1">{rowOpen && <>{canCreateNext && following && <button type="button" disabled={saving} onClick={() => makeNextPeriod(budget, following)} title={t("makeNextPeriodTitle", { month: paydayLabel(following, locale) })} aria-label={t("makeNextPeriod")} className="inline-flex items-center gap-1.5 rounded-lg p-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-2.5 sm:py-1.5 sm:text-ink"><Plus size={14} className="hidden sm:inline" /><Plus size={16} className="sm:hidden" /><span className="hidden sm:inline">{t("makeNextPeriod")}</span></button>}{!discarded && remaining > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} aria-label={t("discardLeftover")} className="inline-flex items-center rounded-lg p-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-3 sm:py-1.5"><CircleSlash size={16} className="sm:hidden" /><span className="hidden sm:inline">{t("discardLeftover")}</span></button>}{discarded && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}<button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="rounded-lg p-2 text-muted hover:text-danger"><Trash2 size={16} /></button></>}<button type="button" onClick={() => toggleBudgetRow(budget.id, !rowOpen)} aria-expanded={rowOpen} aria-label={t("details")} title={t("details")} className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink"><ChevronDown size={16} className={`transition-transform ${rowOpen ? "rotate-180" : ""}`} /></button></div></div><Progress value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100} className="mt-3" indicatorClassName={status === "ok" ? undefined : "bg-danger"} />{rowOpen && <><div className="mt-2 flex items-center justify-between gap-3"><p className={`text-xs font-medium ${status === "exceeded" || status === "warning" || status === "full" ? "text-danger" : "text-muted"}`}>{t(status)}</p>{budget.scope !== "category" && <p className={`num text-xs font-medium ${remaining > 0 ? "text-ink" : "text-faint"}`}>{t("leftover", { amount: money(remaining, locale) })}</p>}</div>{budget.rolled_over_from && <p className="mt-1 text-xs text-faint">{t("includesLeftover")}</p>}{discarded && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}{borrowBlock(budget)}</>}</li>;
-          })}</ul>}</CardContent></Card>
+            return (
+              <li key={budget.id} className="py-4">
+                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                  <div className="min-w-0">
+                    <p className="font-medium text-ink">{label}</p>
+                    {rowOpen && (
+                      <>
+                        <p className="mt-1 text-xs text-muted">
+                          {t("paydayOf", {
+                            month: paydayLabel(
+                              { startsOn: budget.starts_on, endsOn: budget.ends_on },
+                              locale
+                            ),
+                          })}
+                        </p>
+                        <p className="mt-0.5 text-xs text-faint">
+                          {periodRange(
+                            { startsOn: budget.starts_on, endsOn: budget.ends_on },
+                            locale,
+                            Number(today.slice(0, 4))
+                          )}
+                        </p>
+                        <p className="mt-1 text-xs text-muted">
+                          {money(spent, locale)} / {money(effectiveLimit, locale)}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                  <div className="ml-auto flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1">
+                    {rowOpen && (
+                      <>
+                        {canReallocate && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => {
+                              setReallocationSourceId(budget.id);
+                              setReallocationTargetId(reallocationTargetsForRow[0].budget.id);
+                              setReallocationAmount(String(remaining));
+                            }}
+                            title={t("reallocateLeftover")}
+                            className="rounded-lg border border-accent/40 px-2.5 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+                          >
+                            {t("reallocate")}
+                          </button>
+                        )}
+                        {canCreateNext && following && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => makeNextPeriod(budget, following)}
+                            title={t("makeNextPeriodTitle", {
+                              month: paydayLabel(following, locale),
+                            })}
+                            aria-label={t("makeNextPeriod")}
+                            className="inline-flex items-center gap-1.5 rounded-lg p-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-2.5 sm:py-1.5 sm:text-ink"
+                          >
+                            <Plus size={14} className="hidden sm:inline" />
+                            <Plus size={16} className="sm:hidden" />
+                            <span className="hidden sm:inline">{t("makeNextPeriod")}</span>
+                          </button>
+                        )}
+                        {!discarded && remaining > 0 && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => void updateLeftoverDiscard(row, true)}
+                            title={t("discardLeftover")}
+                            aria-label={t("discardLeftover")}
+                            className="inline-flex items-center rounded-lg p-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-3 sm:py-1.5"
+                          >
+                            <CircleSlash size={16} className="sm:hidden" />
+                            <span className="hidden sm:inline">{t("discardLeftover")}</span>
+                          </button>
+                        )}
+                        {discarded && (
+                          <button
+                            type="button"
+                            disabled={saving || hasReallocation}
+                            onClick={() => void updateLeftoverDiscard(row, false)}
+                            title={t("undoDiscard")}
+                            className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+                          >
+                            {t("undoDiscard")}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() =>
+                            void completeAction(async () => {
+                              const result = await deleteBudget(locale, budget.id);
+                              if (!result.ok) throw new Error(result.error);
+                            })
+                          }
+                          aria-label={common("delete")}
+                          title={hasReallocation ? t("errBudgetHasReallocations") : common("delete")}
+                          className="rounded-lg p-2 text-muted hover:text-danger"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => toggleBudgetRow(budget.id, !rowOpen)}
+                      aria-expanded={rowOpen}
+                      aria-label={t("details")}
+                      title={t("details")}
+                      className="rounded-lg p-2 text-muted hover:bg-surface2 hover:text-ink"
+                    >
+                      <ChevronDown
+                        size={16}
+                        className={`transition-transform ${rowOpen ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                  </div>
+                </div>
+                <Progress
+                  value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100}
+                  className="mt-3"
+                  indicatorClassName={status === "ok" ? undefined : "bg-danger"}
+                />
+                {rowOpen && (
+                  <>
+                    <div className="mt-2 flex items-center justify-between gap-3">
+                      <p
+                        className={`text-xs font-medium ${
+                          status === "exceeded" || status === "warning" || status === "full"
+                            ? "text-danger"
+                            : "text-muted"
+                        }`}
+                      >
+                        {t(status)}
+                      </p>
+                      <p
+                        className={`num text-xs font-medium ${
+                          remaining > 0 ? "text-ink" : "text-faint"
+                        }`}
+                      >
+                        {t("leftover", { amount: money(remaining, locale) })}
+                      </p>
+                    </div>
+                    {budget.rolled_over_from && (
+                      <p className="mt-1 text-xs text-faint">{t("includesLeftover")}</p>
+                    )}
+                    {discarded && (
+                      <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>
+                    )}
+                    {borrowBlock(budget)}
+                    {reallocationBlock(budget)}
+                  </>
+                )}
+              </li>
+            );
+          })}</ul>}
+            {reallocationSource && reallocationTargets.length > 0 && (
+              <form
+                onSubmit={submitReallocation}
+                className="mt-4 space-y-3 rounded-xl border border-accent/30 bg-accent/[0.05] p-4"
+              >
+                <div>
+                  <p className="text-sm font-semibold text-ink">{t("reallocateTitle")}</p>
+                  <p className="mt-1 text-xs text-muted">
+                    {t("reallocateSourceRemaining", {
+                      category: budgetScopeLabel(reallocationSource.budget),
+                      amount: money(leftoverOf(reallocationSource), locale),
+                    })}
+                  </p>
+                </div>
+                <Field label={t("reallocateDestination")}>
+                  <select
+                    value={reallocationTargetId}
+                    onChange={(event) => setReallocationTargetId(event.target.value)}
+                    required
+                    className="h-10 w-full rounded-xl border border-line bg-bg1 px-3 text-sm text-ink"
+                  >
+                    {reallocationTargets.map((row) => (
+                      <option key={row.budget.id} value={row.budget.id}>
+                        {budgetScopeLabel(row.budget)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label={t("reallocateAmount")}>
+                  <Input
+                    type="number"
+                    min="1"
+                    max={leftoverOf(reallocationSource)}
+                    step="1"
+                    inputMode="numeric"
+                    value={reallocationAmount}
+                    onChange={(event) => setReallocationAmount(event.target.value)}
+                    required
+                  />
+                </Field>
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => setReallocationSourceId("")}
+                    className="rounded-lg border border-line px-3 py-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40"
+                  >
+                    {common("cancel")}
+                  </button>
+                  <Button
+                    type="submit"
+                    disabled={
+                      saving ||
+                      !reallocationTargetId ||
+                      Math.trunc(Number(reallocationAmount)) <= 0 ||
+                      Math.trunc(Number(reallocationAmount)) > leftoverOf(reallocationSource)
+                    }
+                  >
+                    {t("reallocate")}
+                  </Button>
+                </div>
+              </form>
+            )}
+            {activeCategoryBudgets.length > 0 && (
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] px-4 py-3">
+                <span className="text-sm font-medium text-muted">
+                  {t("totalCategoryRemaining", { count: activeCategoryBudgets.length })}
+                </span>
+                <span
+                  className={`num shrink-0 text-sm font-semibold ${
+                    totalActiveCategoryRemaining > 0 ? "text-ink" : "text-faint"
+                  }`}
+                >
+                  {money(totalActiveCategoryRemaining, locale)}
+                </span>
+              </div>
+            )}
+            </CardContent></Card>
 
             {upcomingBudgets.length > 0 && <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={upcomingOpen} onClick={() => setUpcomingOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("upcomingPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${upcomingOpen ? "rotate-180" : ""}`} /></button></h2>{upcomingOpen ? <ul className="mt-3 divide-y divide-line">{upcomingBudgets.map((row) => {
               const target = row.budget.scope === "vault"
@@ -1045,7 +1469,12 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
             <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={endedOpen} onClick={() => setEndedOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("endedPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${endedOpen ? "rotate-180" : ""}`} /></button></h2>{endedOpen ? <><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <>{visibleEnded.length === 0 ? <p className="mt-4 text-sm text-muted">{t("allResolved")}</p> : <ul className="mt-3 flex flex-col gap-2">{visibleEnded.map((row) => {
               const { budget, spent } = row;
               const leftover = leftoverOf(row);
-              const effectiveLimit = budgetEffectiveLimit(budget, spent, borrowTotals.get(budget.id));
+              const effectiveLimit = budgetEffectiveLimit(
+                budget,
+                spent,
+                borrowTotals.get(budget.id),
+                reallocationTotals.get(budget.id)
+              );
               const alreadyCarried = carriedOverIds.has(budget.id);
               const discarded = budget.leftover_discarded;
               // Predikat yang sama dengan `pendingEndedBudgets`: baris yang

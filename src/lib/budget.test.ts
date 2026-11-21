@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   budgetDisplayStatus,
   budgetEffectiveLimit,
   budgetLeftover,
@@ -25,9 +26,10 @@ import type { Transaction } from "@/src/lib/types";
 // Periode mengikuti gaji: 10 Mar..9 Apr.
 const PERIOD = { starts_on: "2026-03-10", ends_on: "2026-04-09" };
 
-type TxSlice = Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> & {
-  id?: number;
-};
+type TxSlice = Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> &
+  Partial<Pick<Transaction, "transfer_direction" | "group_id">> & {
+    id?: number;
+  };
 
 function tx(over: Partial<TxSlice> = {}): TxSlice {
   return {
@@ -93,14 +95,44 @@ describe("budgetSpend", () => {
     ).toBe(0);
   });
 
-  it("mengabaikan income dan transfer", () => {
+  it("mengabaikan income dan transfer tanpa arah keluar", () => {
     const rows = [
       tx({ type: "income", amount: 500_000, category_id: "cat-food", vault_id: "vault-a" }),
-      tx({ type: "transfer", amount: 300_000, category_id: "cat-food", vault_id: "vault-a" }),
+      tx({
+        type: "transfer",
+        amount: 300_000,
+        category_id: "cat-food",
+        vault_id: "vault-a",
+        transfer_direction: "in",
+      }),
       tx({ amount: 20_000, category_id: "cat-food", vault_id: "vault-a" }),
     ];
     expect(budgetSpend(rows, { scope: "category", scope_id: "cat-food", ...PERIOD })).toBe(20_000);
     expect(budgetSpend(rows, { scope: "vault", scope_id: "vault-a", ...PERIOD })).toBe(20_000);
+  });
+
+  it("menghitung transfer keluar berkategori sekali saja pada anggaran kategori", () => {
+    const rows = [
+      tx({
+        type: "transfer",
+        amount: 300_000,
+        category_id: "cat-food",
+        vault_id: "vault-a",
+        transfer_direction: "out",
+        group_id: "transfer-1",
+      }),
+      tx({
+        type: "transfer",
+        amount: 300_000,
+        category_id: "cat-food",
+        vault_id: "vault-b",
+        transfer_direction: "in",
+        group_id: "transfer-1",
+      }),
+    ];
+    expect(budgetSpend(rows, { scope: "category", scope_id: "cat-food", ...PERIOD })).toBe(300_000);
+    expect(budgetSpend(rows, { scope: "vault", scope_id: "vault-a", ...PERIOD })).toBe(0);
+    expect(budgetSpend(rows, { scope: "vault", scope_id: "vault-b", ...PERIOD })).toBe(0);
   });
 
   it("nol saat tidak ada transaksi atau tidak ada yang cocok", () => {
@@ -513,6 +545,43 @@ describe("findExceededBudget", () => {
     expect(findExceededBudget(rows, [categoryBudget], candidate)).not.toBeNull();
   });
 
+  it("mengecualikan kedua leg transfer saat memeriksa edit", () => {
+    const rows = [
+      tx({
+        id: 7,
+        type: "transfer",
+        amount: 200_000,
+        category_id: "cat-food",
+        vault_id: "vault-a",
+        transfer_direction: "out",
+        group_id: "transfer-1",
+      }),
+      tx({
+        id: 8,
+        type: "transfer",
+        amount: 200_000,
+        category_id: "cat-food",
+        vault_id: "vault-b",
+        transfer_direction: "in",
+        group_id: "transfer-1",
+      }),
+      tx({ amount: 100_000, category_id: "cat-food", vault_id: "vault-a" }),
+    ];
+    const editedTransfer = { ...candidate, type: "transfer" as const, amount: 400_000 };
+    expect(
+      findExceededBudget(rows, [categoryBudget], editedTransfer, undefined, undefined, "transfer-1")
+    ).toBeNull();
+    expect(findExceededBudget(rows, [categoryBudget], editedTransfer)?.spent).toBe(300_000);
+  });
+
+  it("menolak transfer berkategori yang melampaui sisa anggaran", () => {
+    const rows = [tx({ amount: 400_000, category_id: "cat-food" })];
+    const transfer = { ...candidate, type: "transfer" as const, amount: 100_001 };
+    const conflict = findExceededBudget(rows, [categoryBudget], transfer);
+    expect(conflict?.remaining).toBe(100_000);
+    expect(conflict?.projected).toBe(500_001);
+  });
+
   it("memeriksa scope vault walaupun kategori tidak cocok", () => {
     const rows = [tx({ amount: 200_000, category_id: "cat-other", vault_id: "vault-a" })];
     const conflict = findExceededBudget(
@@ -640,6 +709,101 @@ describe("budgetEffectiveLimit dengan pinjaman", () => {
         { borrowedIn: 200_000, borrowedOut: 0 }
       )
     ).toBe(300_000);
+  });
+});
+
+describe("alokasi ulang sisa anggaran", () => {
+  const source = {
+    id: "budget-source",
+    scope: "category" as const,
+    scope_id: "cat-source",
+    limit_amount: 500_000,
+    ...PERIOD,
+  };
+  const destination = {
+    id: "budget-destination",
+    scope: "category" as const,
+    scope_id: "cat-destination",
+    limit_amount: 300_000,
+    ...PERIOD,
+  };
+
+  it("mengurangi batas sumber dan menambah batas tujuan, tetapi tidak diwariskan ke baris periode baru", () => {
+    const totals = aggregateReallocations([
+      {
+        from_budget_id: source.id,
+        to_budget_id: destination.id,
+        amount: 200_000,
+        reversed_at: null,
+      },
+      {
+        from_budget_id: source.id,
+        to_budget_id: destination.id,
+        amount: 50_000,
+        reversed_at: "2026-03-20T00:00:00Z",
+      },
+    ]);
+
+    expect(budgetEffectiveLimit(source, 100_000, undefined, totals.get(source.id))).toBe(300_000);
+    expect(
+      budgetEffectiveLimit(destination, 100_000, undefined, totals.get(destination.id))
+    ).toBe(500_000);
+    expect(
+      budgetEffectiveLimit(
+        destination,
+        0,
+        undefined,
+        totals.get("budget-destination-next-period")
+      )
+    ).toBe(300_000);
+  });
+
+  it("menolak pemakaian sumber setelah sisa dialihkan dan mengizinkan pemakaian tujuan", () => {
+    const totals = aggregateReallocations([
+      {
+        from_budget_id: source.id,
+        to_budget_id: destination.id,
+        amount: 200_000,
+        reversed_at: null,
+      },
+    ]);
+    const history = [
+      tx({ amount: 300_000, category_id: source.scope_id }),
+      tx({ amount: 250_000, category_id: destination.scope_id }),
+    ];
+
+    expect(
+      findExceededBudget(
+        history,
+        [source],
+        {
+          amount: 1,
+          date: "2026-03-20",
+          category_id: source.scope_id,
+          vault_id: null,
+        },
+        undefined,
+        undefined,
+        undefined,
+        totals
+      )?.remaining
+    ).toBe(0);
+    expect(
+      findExceededBudget(
+        history,
+        [destination],
+        {
+          amount: 150_000,
+          date: "2026-03-20",
+          category_id: destination.scope_id,
+          vault_id: null,
+        },
+        undefined,
+        undefined,
+        undefined,
+        totals
+      )
+    ).toBeNull();
   });
 });
 

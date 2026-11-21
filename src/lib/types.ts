@@ -104,6 +104,17 @@ export interface BudgetBorrow {
   created_at: string;
 }
 
+export interface BudgetReallocation {
+  id: string;
+  user_id: string;
+  from_budget_id: string;
+  to_budget_id: string;
+  amount: number;
+  created_at: string;
+  reversed_at: string | null;
+  reversed_by: string | null;
+}
+
 export interface RecurringTransaction {
   id: string;
   user_id: string;

@@ -8,10 +8,12 @@ import { deleteReducesLockedVaultError, vaultBalanceDelta, expenseVaultError } f
 import { computeSourceVaultBalances, sourceVaultBalance, type PairTransaction } from "@/src/lib/sources";
 import {
   aggregateBorrows,
+  aggregateReallocations,
   budgetSpend,
   planBorrowShrink,
   requiredBorrowTotal,
   type BudgetBorrowRow,
+  type BudgetReallocationRow,
 } from "@/src/lib/budget";
 import { budgetRejection, checkExpenseBudget } from "@/src/lib/budget-guard";
 import { loadVaultShortfall } from "@/src/lib/vault-guard";
@@ -34,6 +36,55 @@ export interface TxResult {
   };
   /** Kekurangan saldo/kolam vault; UI menawarkan pinjaman antar vault. */
   vaultShortfall?: VaultShortfallPayload;
+}
+
+function budgetTriggerResult(error: {
+  message?: string;
+  details?: string | null;
+}): TxResult | null {
+  const message = error.message;
+  if (
+    message !== "transactions.budgetExceededCategory" &&
+    message !== "transactions.budgetExceededVault"
+  ) {
+    return null;
+  }
+
+  try {
+    const detail: unknown = JSON.parse(error.details ?? "");
+    if (
+      detail !== null &&
+      typeof detail === "object" &&
+      "budget_id" in detail &&
+      typeof detail.budget_id === "string" &&
+      "remaining" in detail &&
+      typeof detail.remaining === "number" &&
+      "projected" in detail &&
+      typeof detail.projected === "number" &&
+      "effective_limit" in detail &&
+      typeof detail.effective_limit === "number"
+    ) {
+      return {
+        ok: false,
+        error: message,
+        budget: {
+          scope: message === "transactions.budgetExceededCategory" ? "category" : "vault",
+          id: detail.budget_id,
+          remaining: Math.max(0, detail.remaining),
+          shortfall: Math.max(0, detail.projected - detail.effective_limit),
+        },
+      };
+    }
+  } catch {
+    // The error is logged below; do not turn a malformed database response
+    // into a success-shaped budget rejection.
+  }
+
+  console.error("Budget trigger returned an invalid conflict detail.", {
+    message,
+    details: error.details,
+  });
+  return { ok: false, error: "err.generic" };
 }
 
 interface RewardPayload {
@@ -290,24 +341,57 @@ export async function addTransaction(
       return { ok: false, error: "transactions.sourceNotInVault" };
     }
 
+    const budgetGuard = await checkExpenseBudget(supabase, user.id, {
+      type: "transfer",
+      amount,
+      date,
+      category_id: base.category_id ?? null,
+      vault_id: sourceVaultId,
+    });
+    if (!budgetGuard.ok) {
+      if ("conflict" in budgetGuard) {
+        return { ok: false, ...budgetRejection(budgetGuard.conflict) };
+      }
+      return { ok: false, error: budgetGuard.error };
+    }
+
     const groupId = crypto.randomUUID();
-    const { error } = await supabase.from("transactions").insert([
-      { ...base, group_id: groupId },
-      {
-        ...base,
-        vault_id: destinationVaultId,
-        transfer_direction: "in",
-        group_id: groupId,
-      },
-    ]);
-    if (error) return { ok: false, error: "err.generic" };
+    const { data: inserted, error } = await supabase
+      .from("transactions")
+      .insert([
+        { ...base, group_id: groupId },
+        {
+          ...base,
+          vault_id: destinationVaultId,
+          transfer_direction: "in",
+          group_id: groupId,
+        },
+      ])
+      .select("id, transfer_direction");
+    if (error) {
+      const budgetResult = budgetTriggerResult(error);
+      return budgetResult ?? { ok: false, error: "err.generic" };
+    }
+    const outgoing = inserted?.find((row) => row.transfer_direction === "out");
+    if (options?.borrowIds?.length && outgoing) {
+      const { error: linkError } = await supabase
+        .from("budget_borrows")
+        .update({ transaction_id: outgoing.id })
+        .in("id", options.borrowIds)
+        .eq("user_id", user.id)
+        .is("transaction_id", null);
+      if (linkError) console.error("Supabase budget borrow link failed.", linkError);
+    }
   } else {
     const { data: inserted, error } = await supabase
       .from("transactions")
       .insert(base)
       .select("id")
       .single();
-    if (error) return { ok: false, error: "err.generic" };
+    if (error) {
+      const budgetResult = budgetTriggerResult(error);
+      return budgetResult ?? { ok: false, error: "err.generic" };
+    }
 
     // Tautkan pinjaman yang menutup kekurangan anggaran. Gagal menaut
     // tidak membatalkan transaksi yang sudah tersimpan -- pinjaman tetap
@@ -727,8 +811,8 @@ export async function deleteTransaction(
 }
 
 /**
- * Memangkas pinjaman anggaran yang menempel pada transaksi pengeluaran
- * setelah nominalnya diedit menjadi lebih kecil.
+ * Memangkas pinjaman anggaran yang menempel pada transaksi pengeluaran atau
+ * transfer berkategori setelah pemakaian anggarannya berubah.
  *
  * Guard pre-edit sudah memastikan transaksi muat dengan pinjaman yang ada;
  * fungsi ini hanya menghitung berapa sisa pinjaman yang benar-benar masih
@@ -775,6 +859,17 @@ async function shrinkTransactionBorrows(
       return;
     }
     const totals = aggregateBorrows((allBorrows ?? []) as BudgetBorrowRow[]);
+    const { data: reallocationRows, error: reallocationError } = await supabase
+      .from("budget_reallocations")
+      .select("from_budget_id, to_budget_id, amount, reversed_at")
+      .eq("user_id", userId);
+    if (reallocationError) {
+      console.error("Supabase load budget reallocations failed during shrink.", reallocationError);
+      return;
+    }
+    const reallocationTotals = aggregateReallocations(
+      (reallocationRows ?? []) as BudgetReallocationRow[]
+    );
 
     const minStarts = budgets.reduce(
       (min, b) => (b.starts_on < min ? b.starts_on : min),
@@ -785,22 +880,22 @@ async function shrinkTransactionBorrows(
       budgets[0].ends_on
     );
 
-    const { data: expenseTxs, error: expenseError } = await supabase
+    const { data: budgetTxs, error: budgetTxError } = await supabase
       .from("transactions")
-      .select("type, amount, category_id, vault_id, date")
+      .select("type, amount, category_id, vault_id, date, transfer_direction, group_id")
       .eq("user_id", userId)
-      .eq("type", "expense")
+      .in("type", ["expense", "transfer"])
       .gte("date", minStarts)
       .lte("date", maxEnds);
-    if (expenseError) {
-      console.error("Supabase load expenses failed during shrink.", expenseError);
+    if (budgetTxError) {
+      console.error("Supabase load budget transactions failed during shrink.", budgetTxError);
       return;
     }
 
-    const txRows = (expenseTxs ?? []) as Pick<
-      Transaction,
-      "type" | "amount" | "category_id" | "vault_id" | "date"
-    >[];
+    const txRows = (budgetTxs ?? []) as Array<
+      Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> &
+        Partial<Pick<Transaction, "transfer_direction" | "group_id">>
+    >;
 
     const needs = new Map<string, number>();
     for (const b of budgets) {
@@ -808,7 +903,13 @@ async function shrinkTransactionBorrows(
       const linkedTotal = txBorrows
         .filter((row) => row.to_budget_id === b.id)
         .reduce((sum, row) => sum + row.amount, 0);
-      const need = requiredBorrowTotal(b, spent, totals.get(b.id), linkedTotal);
+      const need = requiredBorrowTotal(
+        b,
+        spent,
+        totals.get(b.id),
+        linkedTotal,
+        reallocationTotals.get(b.id)
+      );
       needs.set(b.id, need);
     }
 
@@ -883,7 +984,7 @@ export async function editTransaction(
 
   const { data: existing, error: existingError } = await supabase
     .from("transactions")
-    .select("id, type")
+    .select("id, type, group_id")
     .eq("id", input.id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -910,6 +1011,28 @@ export async function editTransaction(
       }
       return { ok: false, error: budgetGuard.error };
     }
+  } else if (existing.type === "transfer" && existing.group_id) {
+    // Kedua leg transfer lama dikecualikan bersama-sama; budgetSpend hanya
+    // menghitung leg keluar sehingga kandidat baru diproyeksikan tepat sekali.
+    const budgetGuard = await checkExpenseBudget(
+      supabase,
+      user.id,
+      {
+        type: "transfer",
+        amount,
+        date: input.date,
+        category_id: input.categoryId,
+        vault_id: null,
+      },
+      undefined,
+      existing.group_id
+    );
+    if (!budgetGuard.ok) {
+      if ("conflict" in budgetGuard) {
+        return { ok: false, ...budgetRejection(budgetGuard.conflict) };
+      }
+      return { ok: false, error: budgetGuard.error };
+    }
   }
 
   const { error } = await supabase.rpc("edit_financial_transaction", {
@@ -923,6 +1046,8 @@ export async function editTransaction(
   });
   if (error) {
     console.error("Supabase transaction edit failed.", { code: error.code, message: error.message });
+    const budgetResult = budgetTriggerResult(error);
+    if (budgetResult) return budgetResult;
     if (error.message.startsWith("err.") || error.message.startsWith("transactions.")) {
       // Penolakan guard dana vault pada expense dilengkapi angka kekurangannya
       // (dinilai tanpa baris lama, sama seperti guard RPC) supaya bisa
@@ -950,7 +1075,7 @@ export async function editTransaction(
     return { ok: false, error: "err.generic" };
   }
 
-  if (existing.type === "expense") {
+  if (existing.type === "expense" || existing.type === "transfer") {
     await shrinkTransactionBorrows(supabase, user.id, input.id);
   }
 
