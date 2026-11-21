@@ -20,6 +20,7 @@ import {
   Upload,
   UserRound,
   Wallet,
+  ArrowLeftRight,
   Play,
   ListChecks,
   PiggyBank,
@@ -1227,7 +1228,25 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               <li key={budget.id} className="py-4">
                 <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
                   <div className="min-w-0">
-                    <p className="font-medium text-ink">{label}</p>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <p className="min-w-0 break-words font-medium text-ink">{label}</p>
+                      {canReallocate && (
+                        <button
+                          type="button"
+                          disabled={saving}
+                          onClick={() => {
+                            setReallocationSourceId(budget.id);
+                            setReallocationTargetId(reallocationTargetsForRow[0].budget.id);
+                            setReallocationAmount(String(remaining));
+                          }}
+                          title={t("reallocateLeftover")}
+                          aria-label={t("reallocateLeftover")}
+                          className="shrink-0 rounded-lg border border-accent/30 p-1.5 text-accent hover:bg-accent/10 disabled:opacity-40"
+                        >
+                          <ArrowLeftRight size={16} aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
                     {rowOpen && (
                       <>
                         <p className="mt-1 text-xs text-muted">
@@ -1254,21 +1273,6 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                   <div className="ml-auto flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1">
                     {rowOpen && (
                       <>
-                        {canReallocate && (
-                          <button
-                            type="button"
-                            disabled={saving}
-                            onClick={() => {
-                              setReallocationSourceId(budget.id);
-                              setReallocationTargetId(reallocationTargetsForRow[0].budget.id);
-                              setReallocationAmount(String(remaining));
-                            }}
-                            title={t("reallocateLeftover")}
-                            className="rounded-lg border border-accent/40 px-2.5 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
-                          >
-                            {t("reallocate")}
-                          </button>
-                        )}
                         {canCreateNext && following && (
                           <button
                             type="button"
