@@ -20,7 +20,9 @@ import {
   Upload,
   UserRound,
   Wallet,
-  ArrowLeftRight,
+  ArrowRight,
+  MoveRight,
+  List,
   Play,
   ListChecks,
   PiggyBank,
@@ -228,7 +230,7 @@ export function SupabaseToolsPage({ section }: Props) {
   const [upcomingOpen, setUpcomingOpen] = useState(false);
   // Kartu riwayat terbuka sejak awal: seluruh periode berakhir adalah isi
   // utamanya, bukan sesuatu yang disembunyikan di balik dua kali klik.
-  const [endedOpen, setEndedOpen] = useState(true);
+  const [endedOpen, setEndedOpen] = useState(false);
   // Baris transaksi yang sedang dibuka pada kartu riwayat (id anggaran).
   const [historyTxId, setHistoryTxId] = useState<string | null>(null);
   // Override per baris "Batas Anggaran". Key yang tidak ada = ikut aturan
@@ -1305,22 +1307,6 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-1.5">
                       <p className="min-w-0 break-words font-medium text-ink">{label}</p>
-                      {canReallocate && (
-                        <button
-                          type="button"
-                          disabled={saving}
-                          onClick={() => {
-                            setReallocationSourceId(budget.id);
-                            setReallocationTargetId(reallocationTargetsForRow[0].budget.id);
-                            setReallocationAmount(String(remaining));
-                          }}
-                          title={t("reallocateLeftover")}
-                          aria-label={t("reallocateLeftover")}
-                          className="shrink-0 rounded-lg border border-accent/30 p-1.5 text-accent hover:bg-accent/10 disabled:opacity-40"
-                        >
-                          <ArrowLeftRight size={16} aria-hidden="true" />
-                        </button>
-                      )}
                     </div>
                     {rowOpen && (
                       <>
@@ -1375,6 +1361,23 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                           >
                             <CircleSlash size={16} className="sm:hidden" />
                             <span className="hidden sm:inline">{t("discardLeftover")}</span>
+                          </button>
+                        )}
+                        {canReallocate && (
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => {
+                              setReallocationSourceId(budget.id);
+                              setReallocationTargetId(reallocationTargetsForRow[0].budget.id);
+                              setReallocationAmount(String(remaining));
+                            }}
+                            title={t("reallocateLeftover")}
+                            aria-label={t("reallocateLeftover")}
+                            className="inline-flex items-center rounded-lg p-2 text-xs text-accent hover:bg-accent/10 disabled:opacity-40 sm:border sm:border-accent/40 sm:px-3 sm:py-1.5"
+                          >
+                            <MoveRight size={16} className="sm:hidden" />
+                            <span className="hidden sm:inline">{t("reallocate")}</span>
                           </button>
                         )}
                         {discarded && (
@@ -1698,62 +1701,19 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                                     key={budget.id}
                                     className={`py-4 -mx-3 px-3 rounded-xl border-l-2 ${isPending ? "border-accent bg-accent/[0.06]" : "border-transparent"}`}
                                   >
-                                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
-                                      <div className={`min-w-0 ${isPending ? "" : "opacity-60"}`}>
-                                        <p className="font-medium text-ink">{label}</p>
-                                        <p className="mt-1 text-xs text-muted">
-                                          {money(spent, locale)} / {money(effectiveLimit, locale)}
-                                        </p>
-                                        {alreadyCarried && (
-                                          <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>
-                                        )}
-                                        {discarded && !alreadyCarried && (
-                                          <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>
-                                        )}
-                                        {borrowBlock(budget)}
-                                        {reallocationBlock(budget)}
-                                      </div>
-                                      <div className="ml-auto flex shrink-0 flex-col items-end gap-1.5">
-                                        <button
-                                          type="button"
-                                          disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following}
-                                          onClick={() => void carryOver(row)}
-                                          title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")}
-                                          className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40"
-                                        >
-                                          {t("carryOver")}
-                                        </button>
-                                        {!alreadyCarried && !discarded && leftover > 0 && (
-                                          <button
-                                            type="button"
-                                            disabled={saving}
-                                            onClick={() => void updateLeftoverDiscard(row, true)}
-                                            title={t("discardLeftover")}
-                                            className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40"
-                                          >
-                                            {t("discardLeftover")}
-                                          </button>
-                                        )}
-                                        {discarded && !alreadyCarried && (
-                                          <button
-                                            type="button"
-                                            disabled={saving}
-                                            onClick={() => void updateLeftoverDiscard(row, false)}
-                                            title={t("undoDiscard")}
-                                            className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
-                                          >
-                                            {t("undoDiscard")}
-                                          </button>
-                                        )}
-                                        <button
-                                          type="button"
-                                          aria-expanded={transactionsOpen}
-                                          onClick={() => setHistoryTxId(transactionsOpen ? null : budget.id)}
-                                          className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2"
-                                        >
-                                          {t("periodTransactions", { count: periodTransactions.length })}
-                                        </button>
-                                      </div>
+                                    <div className={`min-w-0 ${isPending ? "" : "opacity-60"}`}>
+                                      <p className="font-medium text-ink">{label}</p>
+                                      <p className="mt-1 text-xs text-muted">
+                                        {money(spent, locale)} / {money(effectiveLimit, locale)}
+                                      </p>
+                                      {alreadyCarried && (
+                                        <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>
+                                      )}
+                                      {discarded && !alreadyCarried && (
+                                        <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>
+                                      )}
+                                      {borrowBlock(budget)}
+                                      {reallocationBlock(budget)}
                                     </div>
                                     <Progress
                                       value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100}
@@ -1799,6 +1759,55 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                                         </span>
                                       </p>
                                     )}
+                                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                                      <button
+                                        type="button"
+                                        disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following}
+                                        onClick={() => void carryOver(row)}
+                                        title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")}
+                                        aria-label={t("carryOver")}
+                                        className="inline-flex items-center rounded-lg p-2 text-xs text-ink hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-3 sm:py-1.5"
+                                      >
+                                        <ArrowRight size={16} className="sm:hidden" />
+                                        <span className="hidden sm:inline">{t("carryOver")}</span>
+                                      </button>
+                                      {!alreadyCarried && !discarded && leftover > 0 && (
+                                        <button
+                                          type="button"
+                                          disabled={saving}
+                                          onClick={() => void updateLeftoverDiscard(row, true)}
+                                          title={t("discardLeftover")}
+                                          aria-label={t("discardLeftover")}
+                                          className="inline-flex items-center rounded-lg p-2 text-xs text-muted hover:bg-surface2 disabled:opacity-40 sm:border sm:border-line sm:px-3 sm:py-1.5"
+                                        >
+                                          <CircleSlash size={16} className="sm:hidden" />
+                                          <span className="hidden sm:inline">{t("discardLeftover")}</span>
+                                        </button>
+                                      )}
+                                      {discarded && !alreadyCarried && (
+                                        <button
+                                          type="button"
+                                          disabled={saving}
+                                          onClick={() => void updateLeftoverDiscard(row, false)}
+                                          title={t("undoDiscard")}
+                                          className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+                                        >
+                                          {t("undoDiscard")}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        aria-expanded={transactionsOpen}
+                                        aria-label={t("periodTransactions", { count: periodTransactions.length })}
+                                        onClick={() => setHistoryTxId(transactionsOpen ? null : budget.id)}
+                                        className="inline-flex items-center rounded-lg p-2 text-xs text-muted hover:bg-surface2 sm:border sm:border-line sm:px-3 sm:py-1.5"
+                                      >
+                                        <List size={16} className="sm:hidden" />
+                                        <span className="hidden sm:inline">
+                                          {t("periodTransactions", { count: periodTransactions.length })}
+                                        </span>
+                                      </button>
+                                    </div>
                                     {transactionsOpen && (
                                       <div className="mt-2 rounded-xl border border-line bg-surface2/40 p-3">
                                         {periodTransactions.length === 0 ? (
