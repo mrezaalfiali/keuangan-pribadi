@@ -35,6 +35,7 @@ import {
   Check,
   Pencil,
   X,
+  Infinity as InfinityIcon,
 } from "lucide-react";
 import { Button } from "@/src/components/ui/button";
 import { Card, CardContent } from "@/src/components/ui/card";
@@ -64,6 +65,7 @@ import { logSupabaseError } from "@/src/lib/supabase/errors";
 import { ensureDefaultCategories } from "@/src/lib/system-categories";
 import { previewAllocation, sumPercent, validateSlots } from "@/src/lib/allocation";
 import {
+  activePeriodRange,
   aggregateBorrows,
   aggregateReallocations,
   budgetDisplayStatus,
@@ -72,10 +74,14 @@ import {
   budgetRatio,
   budgetSpend,
   budgetState,
+  budgetTransactions,
   defaultBudgetPeriod,
+  findPreviousPeriodBudget,
   nextPeriod,
   paydayLabel,
   periodRange,
+  unlimitedCategorySpends,
+  type BudgetPeriod,
 } from "@/src/lib/budget";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { resolveLabel, sortByLabel } from "@/src/lib/labels";
@@ -124,6 +130,21 @@ function money(amount: number, locale: string) {
  */
 function defaultPeriod() {
   return defaultBudgetPeriod() ?? { startsOn: todayISO(), endsOn: todayISO() };
+}
+
+/**
+ * Bulan kalender yang memuat `today`, sebagai fallback periode hitung
+ * kontainer tanpa batas saat tidak ada anggaran aktif. Komponen tanggal
+ * dibaca sebagai teks (bukan `Date` parsing) supaya tidak bergantung pada
+ * zona waktu mesin.
+ */
+function calendarMonthPeriod(today: string): { startsOn: string; endsOn: string } {
+  const prefix = today.slice(0, 7);
+  const year = Number(today.slice(0, 4));
+  const month = Number(today.slice(5, 7));
+  // Hari ke-0 bulan berikutnya = hari terakhir bulan ini.
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return { startsOn: `${prefix}-01`, endsOn: `${prefix}-${String(lastDay).padStart(2, "0")}` };
 }
 
 /** Nonce sederhana agar draft slot punya key unik tanpa library tambahan. */
@@ -201,12 +222,15 @@ export function SupabaseToolsPage({ section }: Props) {
   const [activeVaultMenuId, setActiveVaultMenuId] = useState<string | null>(null);
   const vaultMenuRef = useRef<HTMLDivElement>(null);
   const [budgetFormOpen, setBudgetFormOpen] = useState(false);
-  const [showEndedHistory, setShowEndedHistory] = useState(false);
   const [isLargeScreen, setIsLargeScreen] = useState(false);
   // Dropdown kartu di kolom kanan anggaran: mulai tertutup supaya halaman
   // ringkas, klik judul untuk membuka (berlaku di semua ukuran layar).
   const [upcomingOpen, setUpcomingOpen] = useState(false);
-  const [endedOpen, setEndedOpen] = useState(false);
+  // Kartu riwayat terbuka sejak awal: seluruh periode berakhir adalah isi
+  // utamanya, bukan sesuatu yang disembunyikan di balik dua kali klik.
+  const [endedOpen, setEndedOpen] = useState(true);
+  // Baris transaksi yang sedang dibuka pada kartu riwayat (id anggaran).
+  const [historyTxId, setHistoryTxId] = useState<string | null>(null);
   // Override per baris "Batas Anggaran". Key yang tidak ada = ikut aturan
   // default: baris Penuh/Terlampaui mulai tertutup, sisanya terbuka.
   const [budgetRowOpen, setBudgetRowOpen] = useState<Record<string, boolean>>({});
@@ -812,19 +836,70 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
     0
   );
 
-  const pendingEndedBudgets = endedBudgets.filter((row) => leftoverOf(row) > 0 && !carriedOverIds.has(row.budget.id) && !row.budget.leftover_discarded);
-  const visibleEnded = showEndedHistory ? endedBudgets : pendingEndedBudgets;
+  /**
+   * Periode hitung kontainer "tanpa batas": rentang gabungan anggaran aktif,
+   * supaya terpakainya sejalan dengan sisa di kartu atas. Tanpa anggaran
+   * aktif pun kartu tetap tampil -- memakai bulan kalender berjalan, dan
+   * selisihnya menjadi 0 − terpakai (bisa negatif).
+   */
+  const unlimitedPeriod =
+    activePeriodRange(budgets, today) ?? calendarMonthPeriod(today);
+  const unlimitedRows = unlimitedCategorySpends(
+    transactions,
+    expenseCategories.map((category) => category.id),
+    activeCategoryBudgets.map((row) => row.budget),
+    unlimitedPeriod
+  );
+  const totalUnlimitedSpent = unlimitedRows.reduce((total, row) => total + row.spent, 0);
+  const unlimitedDifference = totalActiveCategoryRemaining - totalUnlimitedSpent;
 
   /**
    * Nama unik untuk daftar ringkas saat kartu "Akan datang"/"Periode berakhir"
    * ditutup: judul tetap terlihat beserta daftar nama kategorinya, tanpa detail.
    *
-   * `endedNames` memakai `endedBudgets` (semua periode), bukan `visibleEnded` —
-   * daftar ringkas harus tetap berisi nama walau tidak ada sisa yang menunggu
-   * keputusan, kalau tidak kartu yang tertutup tampil kosong.
+   * `endedNames` memakai `endedBudgets` (semua periode) — daftar ringkas harus
+   * tetap berisi nama walau tidak ada sisa yang menunggu keputusan, kalau
+   * tidak kartu yang tertutup tampil kosong.
    */
   const upcomingNames = [...new Set(upcomingBudgets.map((row) => budgetScopeLabel(row.budget)))];
   const endedNames = [...new Set(endedBudgets.map((row) => budgetScopeLabel(row.budget)))];
+
+  /**
+   * Riwayat dikelompokkan per periode (rentang tanggal sama), terbaru dulu
+   * di atas. Satu periode biasanya memuat beberapa scope — kategori dan vault
+   * dengan siklus gaji yang sama — jadi kelompoknya mewakili "satu kali gaji",
+   * bukan satu baris anggaran.
+   */
+  const endedPeriodGroups = (() => {
+    const groups = new Map<string, { period: BudgetPeriod; rows: typeof endedBudgets }>();
+    for (const row of endedBudgets) {
+      const key = `${row.budget.starts_on}..${row.budget.ends_on}`;
+      const group = groups.get(key);
+      if (group) group.rows.push(row);
+      else
+        groups.set(key, {
+          period: { startsOn: row.budget.starts_on, endsOn: row.budget.ends_on },
+          rows: [row],
+        });
+    }
+    return [...groups.values()].sort((a, b) =>
+      b.period.startsOn.localeCompare(a.period.startsOn)
+    );
+  })();
+
+  /**
+   * Pemakaian periode sebelumnya per anggaran — dasar baris perbandingan
+   * "naik/turun berapa persen dari periode lalu". Dihitung dari ledger lewat
+   * `budgetSpend`, bukan angka tersimpan, supaya edit/hapus transaksi lama
+   * ikut mengubah perbandingannya.
+   */
+  const previousSpentByBudget = new Map<string, number>();
+  for (const row of endedBudgets) {
+    const previous = findPreviousPeriodBudget(budgets, row.budget);
+    if (!previous) continue;
+    const previousRow = scopedBudgets.find((other) => other.budget.id === previous.id);
+    if (previousRow) previousSpentByBudget.set(row.budget.id, previousRow.spent);
+  }
 
   /**
    * Baris "Batas Anggaran" terbuka atau tidak.
@@ -1153,7 +1228,7 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
         </section>}
 
         {section === "budgets" && <section className="grid items-start gap-5 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-          <Card>
+          <Card id="budget-create">
             <div className={`p-5 ${budgetFormOpen ? "pb-4" : "pb-5"} lg:pb-0`}>
               <h2 className="font-display text-lg font-semibold text-ink">
                 <button
@@ -1350,26 +1425,26 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                   className="mt-3"
                   indicatorClassName={status === "ok" ? undefined : "bg-danger"}
                 />
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <p
+                    className={`text-xs font-medium ${
+                      status === "exceeded" || status === "warning" || status === "full"
+                        ? "text-danger"
+                        : "text-muted"
+                    }`}
+                  >
+                    {t(status)}
+                  </p>
+                  <p
+                    className={`num text-xs font-medium ${
+                      remaining > 0 ? "text-ink" : "text-faint"
+                    }`}
+                  >
+                    {t("leftover", { amount: money(remaining, locale) })}
+                  </p>
+                </div>
                 {rowOpen && (
                   <>
-                    <div className="mt-2 flex items-center justify-between gap-3">
-                      <p
-                        className={`text-xs font-medium ${
-                          status === "exceeded" || status === "warning" || status === "full"
-                            ? "text-danger"
-                            : "text-muted"
-                        }`}
-                      >
-                        {t(status)}
-                      </p>
-                      <p
-                        className={`num text-xs font-medium ${
-                          remaining > 0 ? "text-ink" : "text-faint"
-                        }`}
-                      >
-                        {t("leftover", { amount: money(remaining, locale) })}
-                      </p>
-                    </div>
                     {budget.rolled_over_from && (
                       <p className="mt-1 text-xs text-faint">{t("includesLeftover")}</p>
                     )}
@@ -1462,6 +1537,86 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
             )}
             </CardContent></Card>
 
+            {(activeCategoryBudgets.length > 0 || unlimitedRows.length > 0) && (
+              <Card>
+                <CardContent className="p-5">
+                  <div className="flex items-center gap-3">
+                    <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-surface2 text-accent">
+                      <InfinityIcon size={18} aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0">
+                      <h2 className="font-display text-lg font-semibold text-ink">
+                        {t("unlimitedTitle")}
+                      </h2>
+                      <p className="text-xs text-muted">
+                        {t("unlimitedSubtitle", {
+                          period: periodRange(
+                            unlimitedPeriod,
+                            locale,
+                            Number(today.slice(0, 4))
+                          ),
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                  {unlimitedRows.length === 0 ? (
+                    <p className="mt-6 text-sm text-muted">{t("noUnlimited")}</p>
+                  ) : (
+                    <ul className="mt-4 divide-y divide-line">
+                      {unlimitedRows.map((row) => {
+                        const category = categories.find(
+                          (item) => item.id === row.categoryId
+                        );
+                        const label = category
+                          ? scopeOptionLabel(category)
+                          : t("scopeCategory");
+                        return (
+                          <li
+                            key={row.categoryId}
+                            className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-3"
+                          >
+                            <div className="min-w-0">
+                              <p className="break-words font-medium text-ink">{label}</p>
+                              <p className="num mt-0.5 text-xs text-muted">
+                                {t("spentLabel", { amount: money(row.spent, locale) })}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() => {
+                                setBudgetScope("category");
+                                setBudgetScopeId(row.categoryId);
+                                setBudgetFormOpen(true);
+                                document
+                                  .getElementById("budget-create")
+                                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                              }}
+                              className="shrink-0 rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40"
+                            >
+                              {t("setLimitAction")}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-accent/25 bg-accent/[0.06] px-4 py-3">
+                    <span className="text-sm font-medium text-muted">
+                      {t("differenceLabel")}
+                    </span>
+                    <span
+                      className={`num shrink-0 text-sm font-semibold ${
+                        unlimitedDifference >= 0 ? "text-ink" : "text-danger"
+                      }`}
+                    >
+                      {money(unlimitedDifference, locale)}
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {upcomingBudgets.length > 0 && <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={upcomingOpen} onClick={() => setUpcomingOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("upcomingPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${upcomingOpen ? "rotate-180" : ""}`} /></button></h2>{upcomingOpen ? <ul className="mt-3 divide-y divide-line">{upcomingBudgets.map((row) => {
               const target = row.budget.scope === "vault"
                 ? vaults.find((vault) => vault.id === row.budget.scope_id)
@@ -1470,28 +1625,224 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
               return <li key={row.budget.id} className="flex items-center justify-between gap-3 py-3"><div className="min-w-0"><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: row.budget.starts_on, endsOn: row.budget.ends_on }, locale, Number(today.slice(0, 4)))} · {money(row.budget.limit_amount, locale)}</p></div><button type="button" disabled={saving} onClick={() => void completeAction(async () => { const result = await deleteBudget(locale, row.budget.id); if (!result.ok) throw new Error(result.error); })} aria-label={common("delete")} className="shrink-0 rounded-lg p-2 text-muted hover:bg-surface2 hover:text-danger"><Trash2 size={16} /></button></li>;
             })}</ul> : <ul className="mt-3 divide-y divide-line">{upcomingNames.map((name) => <li key={name} className="py-2 text-sm text-ink">{name}</li>)}</ul>}</CardContent></Card>}
 
-            <Card><CardContent className="p-5"><h2 className="font-display text-base font-semibold text-ink"><button type="button" aria-expanded={endedOpen} onClick={() => setEndedOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left">{t("endedPeriods")}<ChevronDown size={18} aria-hidden="true" className={`shrink-0 text-muted transition-transform ${endedOpen ? "rotate-180" : ""}`} /></button></h2>{endedOpen ? <><p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>{endedBudgets.length === 0 ? <p className="mt-4 text-sm text-muted">{t("noEnded")}</p> : <>{visibleEnded.length === 0 ? <p className="mt-4 text-sm text-muted">{t("allResolved")}</p> : <ul className="mt-3 flex flex-col gap-2">{visibleEnded.map((row) => {
-              const { budget, spent } = row;
-              const leftover = leftoverOf(row);
-              const effectiveLimit = budgetEffectiveLimit(
-                budget,
-                spent,
-                borrowTotals.get(budget.id),
-                reallocationTotals.get(budget.id)
-              );
-              const alreadyCarried = carriedOverIds.has(budget.id);
-              const discarded = budget.leftover_discarded;
-              // Predikat yang sama dengan `pendingEndedBudgets`: baris yang
-              // masih menunggu keputusan dibedakan warnanya dari yang sudah
-              // diproses (dibawa, ditutup, atau sisa 0) saat riwayat dibuka.
-              const isPending = leftover > 0 && !alreadyCarried && !discarded;
-              const target = budget.scope === "vault"
-                ? vaults.find((vault) => vault.id === budget.scope_id)
-                : categories.find((category) => category.id === budget.scope_id);
-              const label = target ? scopeOptionLabel(target) : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
-              const following = nextPeriod({ startsOn: budget.starts_on, endsOn: budget.ends_on });
-              return <li key={budget.id} className={`py-4 -mx-3 px-3 rounded-xl border-l-2 ${isPending ? "border-accent bg-accent/[0.06]" : "border-transparent"}`}><div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2"><div className={`min-w-0 ${isPending ? "" : "opacity-60"}`}><p className="font-medium text-ink">{label}</p><p className="mt-1 text-xs text-muted">{t("paydayOf", { month: paydayLabel({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale) })}</p><p className="mt-0.5 text-xs text-faint">{periodRange({ startsOn: budget.starts_on, endsOn: budget.ends_on }, locale, Number(today.slice(0, 4)))}</p><p className="mt-1 text-xs text-muted">{money(spent, locale)} / {money(effectiveLimit, locale)}</p><p className={`mt-1 text-xs ${leftover > 0 ? "text-accent" : "text-faint"}`}>{leftover > 0 ? t("leftover", { amount: money(leftover, locale) }) : t("noLeftover")}</p>{alreadyCarried && <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>}{discarded && !alreadyCarried && <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>}{borrowBlock(budget)}</div><div className="ml-auto flex shrink-0 flex-col items-end gap-1.5"><button type="button" disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following} onClick={() => void carryOver(row)} title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40">{t("carryOver")}</button>{!alreadyCarried && !discarded && leftover > 0 && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, true)} title={t("discardLeftover")} className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40">{t("discardLeftover")}</button>}{discarded && !alreadyCarried && <button type="button" disabled={saving} onClick={() => void updateLeftoverDiscard(row, false)} title={t("undoDiscard")} className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40">{t("undoDiscard")}</button>}</div></div></li>;
-            })}</ul>}{endedBudgets.length > pendingEndedBudgets.length && <button type="button" onClick={() => setShowEndedHistory(!showEndedHistory)} aria-expanded={showEndedHistory} className="mt-3 rounded-lg border border-line bg-surface2 px-2.5 py-1 text-xs font-medium text-ink hover:border-accent hover:text-accent transition-colors">{showEndedHistory ? t("hideHistory") : t("showHistory")}</button>}</>}</> : <ul className="mt-3 divide-y divide-line">{endedNames.map((name) => <li key={name} className="py-2 text-sm text-ink">{name}</li>)}</ul>}</CardContent></Card>
+            <Card>
+              <CardContent className="p-5">
+                <h2 className="font-display text-base font-semibold text-ink">
+                  <button
+                    type="button"
+                    aria-expanded={endedOpen}
+                    onClick={() => setEndedOpen((open) => !open)}
+                    className="flex w-full items-center justify-between gap-3 text-left"
+                  >
+                    {t("endedPeriods")}
+                    <ChevronDown
+                      size={18}
+                      aria-hidden="true"
+                      className={`shrink-0 text-muted transition-transform ${endedOpen ? "rotate-180" : ""}`}
+                    />
+                  </button>
+                </h2>
+                {endedOpen ? (
+                  <>
+                    <p className="mt-1 text-xs text-muted">{t("leftoverHint")}</p>
+                    {endedBudgets.length === 0 ? (
+                      <p className="mt-4 text-sm text-muted">{t("noEnded")}</p>
+                    ) : (
+                      <div className="mt-4 flex flex-col gap-6">
+                        {endedPeriodGroups.map((group) => (
+                          <div key={`${group.period.startsOn}..${group.period.endsOn}`}>
+                            <h3 className="text-xs font-semibold uppercase tracking-widest text-muted">
+                              {paydayLabel(group.period, locale)} ·{" "}
+                              {periodRange(group.period, locale, Number(today.slice(0, 4)))}
+                            </h3>
+                            <ul className="mt-2 flex flex-col gap-2">
+                              {group.rows.map((row) => {
+                                const { budget, spent } = row;
+                                const leftover = leftoverOf(row);
+                                const effectiveLimit = budgetEffectiveLimit(
+                                  budget,
+                                  spent,
+                                  borrowTotals.get(budget.id),
+                                  reallocationTotals.get(budget.id)
+                                );
+                                const status = budgetDisplayStatus(
+                                  budget,
+                                  spent,
+                                  borrowTotals.get(budget.id),
+                                  reallocationTotals.get(budget.id)
+                                );
+                                const alreadyCarried = carriedOverIds.has(budget.id);
+                                const discarded = budget.leftover_discarded;
+                                // Predikat yang sama dengan `endedBudgets` pending: baris yang
+                                // masih menunggu keputusan dibedakan warnanya dari yang sudah
+                                // diproses (dibawa, ditutup, atau sisa 0).
+                                const isPending = leftover > 0 && !alreadyCarried && !discarded;
+                                const target = budget.scope === "vault"
+                                  ? vaults.find((vault) => vault.id === budget.scope_id)
+                                  : categories.find((category) => category.id === budget.scope_id);
+                                const label = target
+                                  ? scopeOptionLabel(target)
+                                  : t(budget.scope === "vault" ? "scopeVault" : "scopeCategory");
+                                const following = nextPeriod({
+                                  startsOn: budget.starts_on,
+                                  endsOn: budget.ends_on,
+                                });
+                                // Perbandingan dengan periode sebelumnya (scope sama);
+                                // undefined = belum ada pembanding, baris disembunyikan.
+                                const previousSpent = previousSpentByBudget.get(budget.id);
+                                const delta = previousSpent === undefined ? null : spent - previousSpent;
+                                const periodTransactions = budgetTransactions(transactions, budget);
+                                const transactionsOpen = historyTxId === budget.id;
+                                return (
+                                  <li
+                                    key={budget.id}
+                                    className={`py-4 -mx-3 px-3 rounded-xl border-l-2 ${isPending ? "border-accent bg-accent/[0.06]" : "border-transparent"}`}
+                                  >
+                                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+                                      <div className={`min-w-0 ${isPending ? "" : "opacity-60"}`}>
+                                        <p className="font-medium text-ink">{label}</p>
+                                        <p className="mt-1 text-xs text-muted">
+                                          {money(spent, locale)} / {money(effectiveLimit, locale)}
+                                        </p>
+                                        {alreadyCarried && (
+                                          <p className="mt-1 text-xs text-faint">{t("alreadyRolledOver")}</p>
+                                        )}
+                                        {discarded && !alreadyCarried && (
+                                          <p className="mt-1 text-xs text-faint">{t("discardedNote")}</p>
+                                        )}
+                                        {borrowBlock(budget)}
+                                        {reallocationBlock(budget)}
+                                      </div>
+                                      <div className="ml-auto flex shrink-0 flex-col items-end gap-1.5">
+                                        <button
+                                          type="button"
+                                          disabled={saving || discarded || leftover <= 0 || alreadyCarried || !following}
+                                          onClick={() => void carryOver(row)}
+                                          title={discarded || leftover <= 0 || alreadyCarried ? t("cannotCarryOver") : t("carryOverTitle")}
+                                          className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink hover:bg-surface2 disabled:opacity-40"
+                                        >
+                                          {t("carryOver")}
+                                        </button>
+                                        {!alreadyCarried && !discarded && leftover > 0 && (
+                                          <button
+                                            type="button"
+                                            disabled={saving}
+                                            onClick={() => void updateLeftoverDiscard(row, true)}
+                                            title={t("discardLeftover")}
+                                            className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2 disabled:opacity-40"
+                                          >
+                                            {t("discardLeftover")}
+                                          </button>
+                                        )}
+                                        {discarded && !alreadyCarried && (
+                                          <button
+                                            type="button"
+                                            disabled={saving}
+                                            onClick={() => void updateLeftoverDiscard(row, false)}
+                                            title={t("undoDiscard")}
+                                            className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs text-accent hover:bg-accent/10 disabled:opacity-40"
+                                          >
+                                            {t("undoDiscard")}
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          aria-expanded={transactionsOpen}
+                                          onClick={() => setHistoryTxId(transactionsOpen ? null : budget.id)}
+                                          className="rounded-lg border border-line px-3 py-1.5 text-xs text-muted hover:bg-surface2"
+                                        >
+                                          {t("periodTransactions", { count: periodTransactions.length })}
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <Progress
+                                      value={discarded ? 100 : budgetRatio(spent, effectiveLimit) * 100}
+                                      className="mt-3"
+                                      indicatorClassName={status === "ok" ? undefined : "bg-danger"}
+                                    />
+                                    <div className="mt-2 flex items-center justify-between gap-3">
+                                      <p
+                                        className={`text-xs font-medium ${
+                                          status === "exceeded" || status === "warning" || status === "full"
+                                            ? "text-danger"
+                                            : "text-muted"
+                                        }`}
+                                      >
+                                        {t(status)}
+                                      </p>
+                                      <p
+                                        className={`num text-xs font-medium ${leftover > 0 ? "text-ink" : "text-faint"}`}
+                                      >
+                                        {t("leftover", { amount: money(leftover, locale) })}
+                                      </p>
+                                    </div>
+                                    {previousSpent !== undefined && delta !== null && (
+                                      <p className="mt-1 text-xs text-faint">
+                                        {t("vsPrevious", { amount: money(previousSpent, locale) })}
+                                        {" · "}
+                                        <span
+                                          className={delta > 0 ? "text-danger" : delta < 0 ? "text-accent" : "text-faint"}
+                                        >
+                                          {previousSpent === 0
+                                            ? delta === 0
+                                              ? t("compareFlat")
+                                              : t("compareFromZero", { amount: money(Math.abs(delta), locale) })
+                                            : delta > 0
+                                              ? t("compareUp", {
+                                                  percent: Math.round((Math.abs(delta) / previousSpent) * 100),
+                                                })
+                                              : delta < 0
+                                                ? t("compareDown", {
+                                                    percent: Math.round((Math.abs(delta) / previousSpent) * 100),
+                                                  })
+                                                : t("compareFlat")}
+                                        </span>
+                                      </p>
+                                    )}
+                                    {transactionsOpen && (
+                                      <div className="mt-2 rounded-xl border border-line bg-surface2/40 p-3">
+                                        {periodTransactions.length === 0 ? (
+                                          <p className="text-xs text-muted">{t("noPeriodTransactions")}</p>
+                                        ) : (
+                                          <ul className="flex max-h-64 flex-col gap-1.5 overflow-y-auto">
+                                            {periodTransactions.map((tx) => (
+                                              <li key={tx.id} className="flex items-center justify-between gap-2 text-xs">
+                                                <span className="num shrink-0 text-faint">{tx.date}</span>
+                                                <span className="min-w-0 flex-1 truncate text-ink">
+                                                  {tx.note?.trim() ||
+                                                    (tx.type === "transfer" ? txText("transfer") : label)}
+                                                </span>
+                                                <span
+                                                  className={`num shrink-0 ${tx.type === "expense" ? "text-danger" : "text-muted"}`}
+                                                >
+                                                  {money(tx.amount, locale)}
+                                                </span>
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        )}
+                                      </div>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <ul className="mt-3 divide-y divide-line">
+                    {endedNames.map((name) => (
+                      <li key={name} className="py-2 text-sm text-ink">
+                        {name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
           </div>
         </section>}
 

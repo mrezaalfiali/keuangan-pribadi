@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activePeriodRange,
   aggregateBorrows,
   aggregateReallocations,
   budgetDisplayStatus,
@@ -9,15 +10,18 @@ import {
   budgetSpend,
   budgetState,
   budgetStatus,
+  budgetTransactions,
   defaultBudgetPeriod,
   eligibleBorrowLenders,
   findExceededBudget,
+  findPreviousPeriodBudget,
   isValidPeriod,
   nextPeriod,
   paydayLabel,
   periodRange,
   planBorrowShrink,
   requiredBorrowTotal,
+  unlimitedCategorySpends,
   type BudgetPeriod,
   type BudgetStatus,
 } from "@/src/lib/budget";
@@ -1087,5 +1091,235 @@ describe("planBorrowShrink", () => {
       deleteIds: ["b1"],
       updates: [],
     });
+  });
+});
+
+describe("activePeriodRange", () => {
+  it("null saat tidak ada anggaran", () => {
+    expect(activePeriodRange([], "2026-03-15")).toBeNull();
+  });
+
+  it("null saat semua anggaran bukan aktif", () => {
+    const budgets = [
+      { starts_on: "2026-03-01", ends_on: "2026-03-09" },
+      { starts_on: "2026-04-01", ends_on: "2026-04-30" },
+    ];
+    expect(activePeriodRange(budgets, "2026-03-15")).toBeNull();
+  });
+
+  it("mengambil rentang satu anggaran aktif", () => {
+    const budgets = [
+      { starts_on: "2026-03-10", ends_on: "2026-04-09" },
+      { starts_on: "2026-04-10", ends_on: "2026-05-09" },
+    ];
+    expect(activePeriodRange(budgets, "2026-03-15")).toEqual({
+      startsOn: "2026-03-10",
+      endsOn: "2026-04-09",
+    });
+  });
+
+  it("memperluas cakupan saat beberapa anggaran aktif dengan rentang berbeda", () => {
+    // Siklus gaji tidak seragam: satu kategori 10..9, satu lagi 1..31.
+    const budgets = [
+      { starts_on: "2026-03-10", ends_on: "2026-04-09" },
+      { starts_on: "2026-03-01", ends_on: "2026-03-31" },
+      { starts_on: "2026-05-01", ends_on: "2026-05-31" },
+    ];
+    expect(activePeriodRange(budgets, "2026-03-15")).toEqual({
+      startsOn: "2026-03-01",
+      endsOn: "2026-04-09",
+    });
+  });
+});
+
+describe("unlimitedCategorySpends", () => {
+  const PERIOD_RANGE: BudgetPeriod = { startsOn: "2026-03-10", endsOn: "2026-04-09" };
+
+  it("menghitung kategori tanpa anggaran aktif", () => {
+    const rows = [
+      tx({ amount: 120_000, category_id: "cat-skincare" }),
+      tx({ amount: 30_000, category_id: "cat-skincare" }),
+    ];
+    expect(
+      unlimitedCategorySpends(rows, ["cat-skincare"], [], PERIOD_RANGE)
+    ).toEqual([{ categoryId: "cat-skincare", spent: 150_000 }]);
+  });
+
+  it("mengeluarkan kategori yang punya anggaran aktif", () => {
+    const rows = [tx({ amount: 90_000, category_id: "cat-food" })];
+    expect(
+      unlimitedCategorySpends(
+        rows,
+        ["cat-food"],
+        [{ scope: "category", scope_id: "cat-food" }],
+        PERIOD_RANGE
+      )
+    ).toEqual([]);
+  });
+
+  it("anggaran scope vault tidak mengecualikan kategori", () => {
+    const rows = [tx({ amount: 90_000, category_id: "cat-food" })];
+    expect(
+      unlimitedCategorySpends(
+        rows,
+        ["cat-food"],
+        [{ scope: "vault", scope_id: "vault-a" }],
+        PERIOD_RANGE
+      )
+    ).toEqual([{ categoryId: "cat-food", spent: 90_000 }]);
+  });
+
+  it("menggugurkan kategori yang tidak bertransaksi pada periode", () => {
+    const rows = [
+      tx({ amount: 50_000, category_id: "cat-old", date: "2026-03-09" }),
+      tx({ amount: 40_000, category_id: "cat-future", date: "2026-04-10" }),
+    ];
+    expect(
+      unlimitedCategorySpends(rows, ["cat-old", "cat-future"], [], PERIOD_RANGE)
+    ).toEqual([]);
+  });
+
+  it("menghitung transfer ber-kategori lewat leg keluar saja", () => {
+    const rows = [
+      tx({ type: "transfer", amount: 70_000, category_id: "cat-move", transfer_direction: "out" }),
+      tx({ type: "transfer", amount: 70_000, category_id: "cat-move", transfer_direction: "in" }),
+    ];
+    expect(
+      unlimitedCategorySpends(rows, ["cat-move"], [], PERIOD_RANGE)
+    ).toEqual([{ categoryId: "cat-move", spent: 70_000 }]);
+  });
+
+  it("mengabaikan kategori yang tidak ada di daftar terlihat", () => {
+    const rows = [tx({ amount: 60_000, category_id: "cat-hidden" })];
+    expect(unlimitedCategorySpends(rows, [], [], PERIOD_RANGE)).toEqual([]);
+  });
+
+  it("mengurutkan pemakaian menurun", () => {
+    const rows = [
+      tx({ amount: 10_000, category_id: "cat-small" }),
+      tx({ amount: 500_000, category_id: "cat-big" }),
+      tx({ amount: 100_000, category_id: "cat-mid" }),
+    ];
+    expect(
+      unlimitedCategorySpends(rows, ["cat-small", "cat-big", "cat-mid"], [], PERIOD_RANGE).map(
+        (row) => row.categoryId
+      )
+    ).toEqual(["cat-big", "cat-mid", "cat-small"]);
+  });
+});
+
+describe("budgetTransactions", () => {
+  const budget = { scope: "category" as const, scope_id: "cat-food", ...PERIOD };
+
+  it("parity dengan budgetSpend: jumlahnya sama dengan yang dijumlah", () => {
+    const rows = [
+      tx({ amount: 100_000, category_id: "cat-food" }),
+      tx({ amount: 50_000, category_id: "cat-food" }),
+      tx({ amount: 999_000, category_id: "cat-other" }),
+      tx({ type: "income", amount: 700_000, category_id: "cat-food" }),
+      tx({ type: "transfer", amount: 40_000, category_id: "cat-food", transfer_direction: "out" }),
+      tx({ type: "transfer", amount: 40_000, category_id: "cat-food", transfer_direction: "in" }),
+      tx({ amount: 30_000, category_id: "cat-food", date: "2026-03-09" }),
+    ];
+    const selected = budgetTransactions(rows, budget);
+    expect(selected.reduce((sum, row) => sum + row.amount, 0)).toBe(budgetSpend(rows, budget));
+    // 2 expense + 1 leg keluar; income, leg masuk, dan tanggal di luar gugur.
+    expect(selected).toHaveLength(3);
+  });
+
+  it("mempertahankan urutan baris seperti input", () => {
+    const rows = [
+      tx({ amount: 30_000, category_id: "cat-food", date: "2026-03-20" }),
+      tx({ amount: 10_000, category_id: "cat-food", date: "2026-03-12" }),
+      tx({ amount: 20_000, category_id: "cat-food", date: "2026-03-15" }),
+    ];
+    expect(budgetTransactions(rows, budget).map((row) => row.amount)).toEqual([
+      30_000, 10_000, 20_000,
+    ]);
+  });
+
+  it("scope vault hanya memilih expense vault yang sama", () => {
+    const vaultBudget = { scope: "vault" as const, scope_id: "vault-a", ...PERIOD };
+    const rows = [
+      tx({ amount: 25_000, vault_id: "vault-a" }),
+      tx({ amount: 99_000, vault_id: "vault-b" }),
+      tx({ type: "transfer", amount: 60_000, vault_id: "vault-a", transfer_direction: "out" }),
+    ];
+    expect(budgetTransactions(rows, vaultBudget).map((row) => row.amount)).toEqual([25_000]);
+  });
+
+  it("baris terpilih membawa id aslinya untuk daftar transaksi", () => {
+    const rows = [tx({ id: 42, amount: 15_000, category_id: "cat-food" })];
+    expect(budgetTransactions(rows, budget).map((row) => row.id)).toEqual([42]);
+  });
+});
+
+describe("findPreviousPeriodBudget", () => {
+  const current = {
+    id: "b-current",
+    scope: "category" as const,
+    scope_id: "cat-food",
+    starts_on: "2026-03-10",
+    ends_on: "2026-04-09",
+  };
+
+  it("null saat belum ada periode sebelumnya", () => {
+    expect(findPreviousPeriodBudget([current], current)).toBeNull();
+  });
+
+  it("memilih periode berbagi scope yang berakhir tepat sebelum mulai", () => {
+    const previous = {
+      id: "b-prev",
+      scope: "category" as const,
+      scope_id: "cat-food",
+      starts_on: "2026-02-10",
+      ends_on: "2026-03-09",
+    };
+    expect(findPreviousPeriodBudget([previous, current], current)).toBe(previous);
+  });
+
+  it("mengabaikan scope lain dan periode yang masih tumpang tindih", () => {
+    const otherScope = {
+      id: "b-vault",
+      scope: "vault" as const,
+      scope_id: "vault-a",
+      starts_on: "2026-02-10",
+      ends_on: "2026-03-09",
+    };
+    const otherCategory = {
+      id: "b-other",
+      scope: "category" as const,
+      scope_id: "cat-fun",
+      starts_on: "2026-02-10",
+      ends_on: "2026-03-09",
+    };
+    const overlapping = {
+      id: "b-overlap",
+      scope: "category" as const,
+      scope_id: "cat-food",
+      starts_on: "2026-03-01",
+      ends_on: "2026-04-30",
+    };
+    expect(
+      findPreviousPeriodBudget([otherScope, otherCategory, overlapping, current], current)
+    ).toBeNull();
+  });
+
+  it("memilih kandidat terdekat saat ada beberapa periode sebelumnya", () => {
+    const older = {
+      id: "b-older",
+      scope: "category" as const,
+      scope_id: "cat-food",
+      starts_on: "2026-01-10",
+      ends_on: "2026-02-09",
+    };
+    const nearer = {
+      id: "b-nearer",
+      scope: "category" as const,
+      scope_id: "cat-food",
+      starts_on: "2026-02-10",
+      ends_on: "2026-03-09",
+    };
+    expect(findPreviousPeriodBudget([older, nearer, current], current)).toBe(nearer);
   });
 });

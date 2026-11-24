@@ -24,6 +24,37 @@ import { todayISO } from "./utils";
  * dan transfer tanpa kategori tidak memakai anggaran kategori. Transfer tidak
  * memakai anggaran vault karena hanya memindahkan saldo antar-vault.
  */
+
+/**
+ * Baris transaksi yang ikut terhitung pada satu anggaran -- sumber tunggal
+ * untuk `budgetSpend` maupun daftar transaksi di kartu riwayat, supaya angka
+ * terpakai dan isi daftarnya tidak mungkin berbeda.
+ *
+ * Predikatnya persis aturan `budgetSpend` lama: expense penuh untuk kedua
+ * scope, transfer ber-kategori hanya leg keluar pada scope kategori, batas
+ * tanggal inklusif dibandingkan leksikografis (kronologis untuk ISO, tanpa
+ * perbedaan zona waktu).
+ */
+export function budgetTransactions<
+  T extends Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> &
+    Partial<Pick<Transaction, "transfer_direction">>
+>(transactions: readonly T[], budget: Pick<Budget, "scope" | "scope_id" | "starts_on" | "ends_on">): T[] {
+  const { starts_on: startsOn, ends_on: endsOn } = budget;
+  return transactions.filter((tx) => {
+    const isExpense = tx.type === "expense";
+    const isCategorizedTransferOut =
+      budget.scope === "category" &&
+      tx.type === "transfer" &&
+      tx.transfer_direction === "out";
+    if (!isExpense && !isCategorizedTransferOut) return false;
+    // Bandingkan string ISO YYYY-MM-DD secara leksikografis: sama dengan
+    // kronologis, dan tidak terpengaruh zona waktu seperti Date parsing.
+    if (tx.date < startsOn || tx.date > endsOn) return false;
+    if (budget.scope === "category") return tx.category_id === budget.scope_id;
+    return tx.vault_id === budget.scope_id;
+  });
+}
+
 export function budgetSpend(
   transactions: readonly (
     Pick<Transaction, "type" | "amount" | "category_id" | "vault_id" | "date"> &
@@ -31,20 +62,7 @@ export function budgetSpend(
   )[],
   budget: Pick<Budget, "scope" | "scope_id" | "starts_on" | "ends_on">
 ): number {
-  const { starts_on: startsOn, ends_on: endsOn } = budget;
-  return transactions.reduce((sum, tx) => {
-    const isExpense = tx.type === "expense";
-    const isCategorizedTransferOut =
-      budget.scope === "category" &&
-      tx.type === "transfer" &&
-      tx.transfer_direction === "out";
-    if (!isExpense && !isCategorizedTransferOut) return sum;
-    // Bandingkan string ISO YYYY-MM-DD secara leksikografis: sama dengan
-    // kronologis, dan tidak terpengaruh zona waktu seperti Date parsing.
-    if (tx.date < startsOn || tx.date > endsOn) return sum;
-    if (budget.scope === "category") return tx.category_id === budget.scope_id ? sum + tx.amount : sum;
-    return tx.vault_id === budget.scope_id ? sum + tx.amount : sum;
-  }, 0);
+  return budgetTransactions(transactions, budget).reduce((sum, tx) => sum + tx.amount, 0);
 }
 
 export type BudgetTransaction = Pick<
@@ -646,4 +664,104 @@ export function budgetState(
   if (today < budget.starts_on) return "upcoming";
   if (today > budget.ends_on) return "ended";
   return "active";
+}
+
+/**
+ * Rentang gabungan seluruh periode anggaran yang sedang aktif hari ini.
+ *
+ * Dipakai sebagai periode hitung kontainer "tanpa batas" supaya angka
+ * terpakainya sejalan dengan sisa yang ditampilkan anggaran berbatas di
+ * atasnya. Bila beberapa anggaran aktif memakai rentang berbeda (siklus
+ * gaji per kategori tidak seragam), hasilnya adalah cakupan terluas --
+ * satu transaksi hanya dihitung sekali walau jatuh di tumpang tindih.
+ *
+ * `null` saat tidak ada satu pun anggaran aktif; pemanggil yang memutuskan
+ * fallback-nya (misalnya bulan kalender berjalan).
+ */
+export function activePeriodRange(
+  budgets: readonly Pick<Budget, "starts_on" | "ends_on">[],
+  today: string = todayISO()
+): BudgetPeriod | null {
+  let startsOn: string | null = null;
+  let endsOn: string | null = null;
+  for (const budget of budgets) {
+    if (budgetState(budget, today) !== "active") continue;
+    if (startsOn === null || budget.starts_on < startsOn) startsOn = budget.starts_on;
+    if (endsOn === null || budget.ends_on > endsOn) endsOn = budget.ends_on;
+  }
+  return startsOn === null || endsOn === null ? null : { startsOn, endsOn };
+}
+
+/**
+ * Anggaran periode sebelumnya untuk scope yang sama.
+ *
+ * Dasar baris perbandingan di kartu riwayat: "periode lalu terpakai berapa".
+ * Kandidat harus berbagi `scope` + `scope_id` dan sudah *berakhir sebelum*
+ * periode ini dimulai (`ends_on < starts_on`), sehingga periode yang
+ * tumpang-tindih atau masih berjalan tidak pernah terpilih. Yang terdekat
+ * (`ends_on` terbesar) yang menang -- bukan yang terbaru secara mutlak --
+ * supaya satu periode kosong di tengah tidak melompati pembanding terdekat.
+ *
+ * `null` bila belum ada periode sebelumnya (scope baru atau baru satu
+ * periode); pemanggil menyembunyikan baris perbandingannya.
+ */
+export function findPreviousPeriodBudget<
+  T extends Pick<Budget, "scope" | "scope_id" | "starts_on" | "ends_on">
+>(budgets: readonly T[], current: T): T | null {
+  let previous: T | null = null;
+  for (const budget of budgets) {
+    if (budget.scope !== current.scope || budget.scope_id !== current.scope_id) continue;
+    if (budget.ends_on >= current.starts_on) continue;
+    if (!previous || budget.ends_on > previous.ends_on) previous = budget;
+  }
+  return previous;
+}
+
+export interface UnlimitedCategorySpend {
+  categoryId: string;
+  spent: number;
+}
+
+/**
+ * Pengeluaran per kategori expense yang tidak punya anggaran aktif.
+ *
+ * Kontainer "tanpa batas" dihitung, bukan disimpan: kategori bertransaksi
+ * pada periode muncul sendiri tanpa baris `budgets`, dan guard pengeluaran
+ * memang sudah mengizinkan kategori tanpa anggaran. Kategori yang terlihat
+ * saja yang diproses -- daftar `categoryIds` datang dari state yang sudah
+ * menyaring baris hidden, supaya kategori yang disembunyikan pengguna tidak
+ * muncul kembali lewat pintu belakang.
+ *
+ * `spent` memakai `budgetSpend` dengan scope kategori, jadi aturannya sama
+ * dengan anggaran berbatas: expense dihitung penuh dan transfer ber-kategori
+ * menghitung leg keluar satu kali. Baris dengan pemakaian nol gugur -- kartu
+ * tanpa batas hanya memuat kategori yang benar-benar bertransaksi pada
+ * periode. Hasil diurutkan pemakaian menurun supaya kategori paling besar
+ * terlihat lebih dulu tanpa pengurutan ulang di UI.
+ */
+export function unlimitedCategorySpends(
+  transactions: readonly BudgetTransaction[],
+  categoryIds: readonly string[],
+  activeCategoryBudgets: readonly Pick<Budget, "scope" | "scope_id">[],
+  period: BudgetPeriod
+): UnlimitedCategorySpend[] {
+  const limited = new Set(
+    activeCategoryBudgets
+      .filter((budget) => budget.scope === "category")
+      .map((budget) => budget.scope_id)
+  );
+  const rows: UnlimitedCategorySpend[] = [];
+  for (const categoryId of categoryIds) {
+    if (limited.has(categoryId)) continue;
+    const spent = budgetSpend(transactions, {
+      scope: "category",
+      scope_id: categoryId,
+      starts_on: period.startsOn,
+      ends_on: period.endsOn,
+    });
+    if (spent <= 0) continue;
+    rows.push({ categoryId, spent });
+  }
+  rows.sort((a, b) => b.spent - a.spent);
+  return rows;
 }
