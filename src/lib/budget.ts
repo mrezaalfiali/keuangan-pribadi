@@ -723,7 +723,12 @@ export interface UnlimitedCategorySpend {
 }
 
 /**
- * Pengeluaran per kategori expense yang tidak punya anggaran aktif.
+ * Pengeluaran per kategori expense yang tidak punya anggaran pada `period`.
+ *
+ * Untuk periode aktif, `categoryBudgets` berisi anggaran kategori yang sedang
+ * aktif; untuk riwayat periode lewat, memakai `budgetsOverlappingPeriod` --
+ * yang penting hanya cakupan scope: kategori yang tercakup anggaran mana pun
+ * di periode itu dianggap berbatas.
  *
  * Kontainer "tanpa batas" dihitung, bukan disimpan: kategori bertransaksi
  * pada periode muncul sendiri tanpa baris `budgets`, dan guard pengeluaran
@@ -742,11 +747,11 @@ export interface UnlimitedCategorySpend {
 export function unlimitedCategorySpends(
   transactions: readonly BudgetTransaction[],
   categoryIds: readonly string[],
-  activeCategoryBudgets: readonly Pick<Budget, "scope" | "scope_id">[],
+  categoryBudgets: readonly Pick<Budget, "scope" | "scope_id">[],
   period: BudgetPeriod
 ): UnlimitedCategorySpend[] {
   const limited = new Set(
-    activeCategoryBudgets
+    categoryBudgets
       .filter((budget) => budget.scope === "category")
       .map((budget) => budget.scope_id)
   );
@@ -764,4 +769,25 @@ export function unlimitedCategorySpends(
   }
   rows.sort((a, b) => b.spent - a.spent);
   return rows;
+}
+
+/**
+ * Anggaran yang tanggalnya tumpang-tindih dengan `period` (inklusif di
+ * kedua tepi). Dipakai riwayat "Tanpa Batas" per periode lewat: kategori
+ * dianggap berbatas selama periode itu bila ada anggaran kategori yang
+ * membentang melintasinya -- termasuk anggaran panjang (mis. tahunan) yang
+ * dimulai jauh sebelum periode dan berakhir sesudahnya.
+ *
+ * Scope vault ikut tersaring keluar; `unlimitedCategorySpends` memang hanya
+ * membaca anggaran kategori.
+ */
+export function budgetsOverlappingPeriod<
+  T extends Pick<Budget, "scope" | "starts_on" | "ends_on">
+>(budgets: readonly T[], period: BudgetPeriod): T[] {
+  return budgets.filter(
+    (budget) =>
+      budget.scope === "category" &&
+      budget.starts_on <= period.endsOn &&
+      budget.ends_on >= period.startsOn
+  );
 }

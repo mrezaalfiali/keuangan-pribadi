@@ -6,6 +6,7 @@ import {
   budgetDisplayStatus,
   budgetEffectiveLimit,
   budgetLeftover,
+  budgetsOverlappingPeriod,
   budgetRatio,
   budgetSpend,
   budgetState,
@@ -1321,5 +1322,61 @@ describe("findPreviousPeriodBudget", () => {
       ends_on: "2026-03-09",
     };
     expect(findPreviousPeriodBudget([older, nearer, current], current)).toBe(nearer);
+  });
+});
+
+describe("budgetsOverlappingPeriod", () => {
+  const PERIOD_RANGE: BudgetPeriod = { startsOn: "2026-03-10", endsOn: "2026-04-09" };
+
+  it("mempertahankan anggaran kategori yang tumpang tindih periode", () => {
+    const inside = {
+      scope: "category" as const,
+      starts_on: "2026-03-01",
+      ends_on: "2026-03-31",
+    };
+    // Anggaran panjang (mis. tahunan) yang membentang melintasi periode.
+    const spanning = {
+      scope: "category" as const,
+      starts_on: "2025-01-01",
+      ends_on: "2026-12-31",
+    };
+    // Tepi bersinggungan: ends_on == startsOn dan starts_on == endsOn tetap
+    // dihitung tumpang tindih (batas inklusif).
+    const touchingStart = {
+      scope: "category" as const,
+      starts_on: "2026-01-01",
+      ends_on: "2026-03-10",
+    };
+    const touchingEnd = {
+      scope: "category" as const,
+      starts_on: "2026-04-09",
+      ends_on: "2026-06-30",
+    };
+    expect(
+      budgetsOverlappingPeriod([inside, spanning, touchingStart, touchingEnd], PERIOD_RANGE)
+    ).toEqual([inside, spanning, touchingStart, touchingEnd]);
+  });
+
+  it("membuang anggaran yang berada sepenuhnya di luar periode", () => {
+    const before = {
+      scope: "category" as const,
+      starts_on: "2026-01-01",
+      ends_on: "2026-03-09",
+    };
+    const after = {
+      scope: "category" as const,
+      starts_on: "2026-04-10",
+      ends_on: "2026-06-30",
+    };
+    expect(budgetsOverlappingPeriod([before, after], PERIOD_RANGE)).toEqual([]);
+  });
+
+  it("membuang anggaran scope vault walau tanggalnya tumpang tindih", () => {
+    const vault = {
+      scope: "vault" as const,
+      starts_on: "2026-03-01",
+      ends_on: "2026-03-31",
+    };
+    expect(budgetsOverlappingPeriod([vault], PERIOD_RANGE)).toEqual([]);
   });
 });

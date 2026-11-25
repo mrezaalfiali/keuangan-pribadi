@@ -77,6 +77,7 @@ import {
   budgetSpend,
   budgetState,
   budgetTransactions,
+  budgetsOverlappingPeriod,
   defaultBudgetPeriod,
   findPreviousPeriodBudget,
   nextPeriod,
@@ -84,6 +85,7 @@ import {
   periodRange,
   unlimitedCategorySpends,
   type BudgetPeriod,
+  type UnlimitedCategorySpend,
 } from "@/src/lib/budget";
 import { currentMonthISO, todayISO } from "@/src/lib/utils";
 import { resolveLabel, sortByLabel } from "@/src/lib/labels";
@@ -228,8 +230,8 @@ export function SupabaseToolsPage({ section }: Props) {
   // Dropdown kartu di kolom kanan anggaran: mulai tertutup supaya halaman
   // ringkas, klik judul untuk membuka (berlaku di semua ukuran layar).
   const [upcomingOpen, setUpcomingOpen] = useState(false);
-  // Kartu riwayat terbuka sejak awal: seluruh periode berakhir adalah isi
-  // utamanya, bukan sesuatu yang disembunyikan di balik dua kali klik.
+  // Kartu riwayat tertutup sejak awal supaya halaman langsung menampilkan
+  // kartu berjalan; klik judul untuk membuka seluruh periode berakhir.
   const [endedOpen, setEndedOpen] = useState(false);
   // Baris transaksi yang sedang dibuka pada kartu riwayat (id anggaran).
   const [historyTxId, setHistoryTxId] = useState<string | null>(null);
@@ -888,6 +890,27 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
       b.period.startsOn.localeCompare(a.period.startsOn)
     );
   })();
+
+  /**
+   * Riwayat "Tanpa Batas" per periode lewat: kategori yang bertransaksi pada
+   * rentang kelompok tanpa anggaran yang membentang di rentang itu. Anggaran
+   * panjang (mis. tahunan) yang melintasi periode ikut dihitung berbatas --
+   * sama dengan makna "anggaran aktif selama periode" pada kartu atas.
+   * Kategori tersembunyi sudah gugur dari state (`applySourceOverrides`).
+   */
+  const endedUnlimitedByKey = new Map<string, UnlimitedCategorySpend[]>();
+  for (const group of endedPeriodGroups) {
+    const key = `${group.period.startsOn}..${group.period.endsOn}`;
+    endedUnlimitedByKey.set(
+      key,
+      unlimitedCategorySpends(
+        transactions,
+        expenseCategories.map((category) => category.id),
+        budgetsOverlappingPeriod(budgets, group.period),
+        group.period
+      )
+    );
+  }
 
   /**
    * Pemakaian periode sebelumnya per anggaran — dasar baris perbandingan
@@ -1652,8 +1675,11 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                       <p className="mt-4 text-sm text-muted">{t("noEnded")}</p>
                     ) : (
                       <div className="mt-4 flex flex-col gap-6">
-                        {endedPeriodGroups.map((group) => (
-                          <div key={`${group.period.startsOn}..${group.period.endsOn}`}>
+                        {endedPeriodGroups.map((group) => {
+                          const groupKey = `${group.period.startsOn}..${group.period.endsOn}`;
+                          const unlimitedInGroup = endedUnlimitedByKey.get(groupKey) ?? [];
+                          return (
+                          <div key={groupKey}>
                             <h3 className="text-xs font-semibold uppercase tracking-widest text-muted">
                               {paydayLabel(group.period, locale)} ·{" "}
                               {periodRange(group.period, locale, Number(today.slice(0, 4)))}
@@ -1836,8 +1862,37 @@ async function completeAction(action: () => Promise<unknown>): Promise<boolean> 
                                 );
                               })}
                             </ul>
+                            {unlimitedInGroup.length > 0 && (
+                              <div className="mt-3 rounded-xl border border-line bg-surface2/40 p-3">
+                                <p className="text-xs font-semibold uppercase tracking-widest text-muted">
+                                  {t("unlimitedTitle")}
+                                </p>
+                                <ul className="mt-2 divide-y divide-line">
+                                  {unlimitedInGroup.map((row) => {
+                                    const category = categories.find((item) => item.id === row.categoryId);
+                                    const label = category
+                                      ? scopeOptionLabel(category)
+                                      : t("scopeCategory");
+                                    return (
+                                      <li
+                                        key={row.categoryId}
+                                        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2"
+                                      >
+                                        <span className="min-w-0 break-words text-sm text-ink">
+                                          {label}
+                                        </span>
+                                        <span className="num shrink-0 text-xs text-muted">
+                                          {t("spentLabel", { amount: money(row.spent, locale) })}
+                                        </span>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+                            )}
                           </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </>
